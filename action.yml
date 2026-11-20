@@ -18,6 +18,8 @@ inputs:
   flag:
     description: Name of the coverage flag for this upload.
     default: default
+  shard:
+    description: Stable ID for one upload within a flag, used to preserve other shards across retries.
   root:
     description: Path prefix to remove from coverage paths.
   path-fixes:

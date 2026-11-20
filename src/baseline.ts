@@ -23,18 +23,19 @@ const issuer = 'https://token.actions.githubusercontent.com';
 export function unsupported(error: unknown): boolean {
   const code = statusCode(error);
   const message = error instanceof Error ? error.message : '';
+  const planLimit =
+    /not supported|not available|not enabled|enterprise cloud|make (?:this|the) repository public|require[s]? a public/i;
   return (
     [403, 404, 422].includes(code ?? 0) &&
-    /not supported|not available|not enabled|enterprise cloud|make (?:this|the) repository public|require[s]? a public/i.test(
-      message,
-    ) &&
+    planLimit.test(message) &&
+    /attestations?|user-owned private repositor(?:y|ies)/i.test(message) &&
     !/token|permission|not accessible|scope/i.test(message)
   );
 }
 
 // Attestations are available on every public repository, so a public
 // repository never falls back. Private and internal repositories only have
-// them on some plans, and listing returns a bare 404 when they are unavailable.
+// them on some plans.
 export async function publicRepository(api: GitHub, repo: Event['repo']): Promise<boolean> {
   const { data } = await api.rest.repos.get(repo);
   return data.visibility ? data.visibility === 'public' : !data.private;
@@ -207,14 +208,9 @@ export class Provenance {
       });
       entries = data.attestations ?? [];
     } catch (error) {
-      if (statusCode(error) === 404) entries = [];
-      else if (auto && unsupported(error) && !(await this.isPublic())) return this.fallBack();
-      else throw error;
+      if (auto && unsupported(error) && !(await this.isPublic())) return this.fallBack();
+      throw error;
     }
-    // A private repository without attestation support cannot be told apart
-    // from an unsigned report, so auto mode only enforces signatures that exist.
-    // Use attestations: required to make their absence fatal.
-    if (!entries.length && auto && !(await this.isPublic())) return this.fallBack();
     if (!entries.length) throw new Error('No attestation found for the coverage artifact');
     this.verifier ??= this.isPublic().then((isPublic) => createVerifier(!isPublic));
     const verifier = await this.verifier;
@@ -271,7 +267,7 @@ export async function findBaseline(
         const artifacts = await listArtifacts(api, event.repo, run.id);
         for (let attempt = run.run_attempt ?? 1; attempt >= 1; attempt--) {
           const name = reportArtifactName(namespace, commit, attempt);
-          const artifact = artifacts.find((entry) => entry.name === name);
+          const artifact = artifacts.find((entry) => entry.name === name && !entry.expired);
           if (!artifact) continue;
           const { bytes, digest } = await downloadArtifact(event.repo, artifact, token);
           await provenance.verify(name, digest, run, attempt);

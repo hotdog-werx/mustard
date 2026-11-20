@@ -14,11 +14,10 @@ still run.
 
 Check the test job's logs and artifact list. Confirm that the coverage tool
 wrote the file matched by the `files` input and that the upload and report steps
-use the same `name`. **Re-run failed jobs** and **Re-run all jobs** both work.
-Each flag uses its uploads from the newest attempt that produced it, so shards
-that were not rerun still count. If you rerun only some shards of one flag,
-rerun all of that flag's jobs, because a newer attempt replaces the flag's older
-uploads. Set `require_uploads: true` if this should fail the coverage checks.
+use the same `name`. For retries, give each upload within a flag a unique,
+stable `shard` ID. If a previous shard artifact expired or an unkeyed flag has
+uploads across attempts, start a new workflow run. Set `require_uploads: true`
+to fail coverage checks when nothing was uploaded.
 [Upload inputs](github-actions/action.md#inputs)
 
 ## Patch coverage is lower than the test tool's line percentage

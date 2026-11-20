@@ -20,23 +20,24 @@ For `report` on same-repository PRs, add `checks: write` and
 
 ## Inputs
 
-| Input            | Modes           | Default or behavior                                                                                                            |
-| ---------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `mode`           | All             | `report`. Also accepts `upload` and `comment`.                                                                                 |
-| `github-token`   | All             | `github.token` from the workflow.                                                                                              |
-| `name`           | All             | Optional namespace for artifacts, checks, the sticky comment, and the badge branch.                                            |
-| `files`          | Upload          | Newline-separated globs. Searches for common coverage report filenames when omitted.                                           |
-| `format`         | Upload          | `auto`, `cobertura`, `lcov`, `coveragepy-json`, `go`, or `jacoco`.                                                             |
-| `flag`           | Upload          | `default`. Set a flag to group reports from one logical suite.                                                                 |
-| `root`           | Upload          | Absolute or repo-relative prefix to strip from paths reported by the coverage tool.                                            |
-| `path-fixes`     | Upload          | Newline-separated `from:to` or `from::to` prefix rewrites.                                                                     |
-| `strict-paths`   | Upload          | `false`. Set `true` to fail if a source path is absent from the checkout.                                                      |
-| `config`         | All             | Repo-relative path to an explicit configuration file. Otherwise uses the [configuration discovery order](../configuration.md). |
-| `config-source`  | Report          | Overrides `base` or `head` on same-repository PRs. Forks use the merge base.                                                   |
-| `workflow`       | Report, comment | Workflow file to accept for baseline artifacts. Defaults to the current or triggering workflow file.                           |
-| `run-id`         | Comment         | If supplied, it must match the completed run that triggered the workflow.                                                      |
-| `fail-ci`        | Report, comment | `false`. When enabled, a non-informational coverage failure also fails the action step.                                        |
-| `retention-days` | All             | Uses the repository's Actions retention policy unless overridden.                                                              |
+| Input            | Modes           | Default or behavior                                                                                                                                     |
+| ---------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mode`           | All             | `report`. Also accepts `upload` and `comment`.                                                                                                          |
+| `github-token`   | All             | `github.token` from the workflow.                                                                                                                       |
+| `name`           | All             | Optional namespace for artifacts, checks, the sticky comment, and the badge branch.                                                                     |
+| `files`          | Upload          | Newline-separated globs. Searches for common coverage report filenames when omitted.                                                                    |
+| `format`         | Upload          | `auto`, `cobertura`, `lcov`, `coveragepy-json`, `go`, or `jacoco`.                                                                                      |
+| `flag`           | Upload          | `default`. Set a flag to group reports from one logical suite.                                                                                          |
+| `shard`          | Upload          | Stable upload ID within a flag for merging coverage across retries. Use 1–64 letters, digits, hyphens, or underscores, starting with a letter or digit. |
+| `root`           | Upload          | Absolute or repo-relative prefix to strip from paths reported by the coverage tool.                                                                     |
+| `path-fixes`     | Upload          | Newline-separated `from:to` or `from::to` prefix rewrites.                                                                                              |
+| `strict-paths`   | Upload          | `false`. Set `true` to fail if a source path is absent from the checkout.                                                                               |
+| `config`         | All             | Repo-relative path to an explicit configuration file. Otherwise uses the [configuration discovery order](../configuration.md).                          |
+| `config-source`  | Report          | Overrides `base` or `head` on same-repository PRs. Forks use the merge base.                                                                            |
+| `workflow`       | Report, comment | Workflow file to accept for baseline artifacts. Defaults to the current or triggering workflow file.                                                    |
+| `run-id`         | Comment         | If supplied, it must match the completed run that triggered the workflow.                                                                               |
+| `fail-ci`        | Report, comment | `false`. When enabled, a non-informational coverage failure also fails the action step.                                                                 |
+| `retention-days` | All             | Uses the repository's Actions retention policy unless overridden.                                                                                       |
 
 Pass the same `name` when uploading or consuming reports for a namespace. For
 `name: api`, the default patch check becomes `mustard[api]/patch`.

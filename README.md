@@ -37,6 +37,7 @@ jobs:
         with:
           mode: upload
           files: coverage.xml
+          shard: test
 
   coverage:
     needs: [test]
@@ -57,8 +58,9 @@ The default project check compares coverage to the newest verified baseline and
 reports neutral until one exists. The patch check requires **100% of changed
 coverable lines**. Partially covered branches count against both percentages.
 Set `require_uploads: true` to fail coverage checks when nothing was uploaded.
-Each flag uses its uploads from the newest run attempt that produced it, so
-**Re-run failed jobs** works. Rerun all of a flag's shards together.
+Give each upload a stable `shard` ID within its flag. On a retry, Mustard uses
+the newest upload for each shard and keeps uploads from jobs that did not rerun.
+[Workflow recipes](docs/github-actions/workflow-recipes.md#combine-test-shards-or-suites)
 
 Add `mustard/project` and `mustard/patch` as required checks in your branch
 ruleset after the checks have appeared on a PR. Select **GitHub Actions** as the
@@ -134,6 +136,7 @@ coverage:
 | `files`          | Upload          | Newline-separated globs. Recognizes common report names in the workspace root when omitted. |
 | `format`         | Upload          | `auto`, `cobertura`, `lcov`, `coveragepy-json`, `go`, or `jacoco`                           |
 | `flag`           | Upload          | `default`. Use one per logical suite. Matrix variants may share a flag.                     |
+| `shard`          | Upload          | Stable upload ID within a flag. Use distinct IDs for matrix legs and upload steps.          |
 | `root`           | Upload          | Repo-relative or absolute prefix to strip from coverage paths                               |
 | `path-fixes`     | Upload          | Newline-separated `from:to` or `from::to` rewrites                                          |
 | `strict-paths`   | Upload          | `false`. Set to `true` to fail on unmatched source paths.                                   |

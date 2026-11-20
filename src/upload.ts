@@ -128,6 +128,7 @@ export async function upload(api: GitHub, namespace: Names, workspace: string) {
   const { normalize, unmatched } = pathResolver(workspace, root, fixes);
   const format = getInput('format') || 'auto';
   const flag = slug(getInput('flag') || 'default');
+  const shard = getInput('shard') || undefined;
   const fileInput = getInput('files');
   const paths = inputs(fileInput, workspace);
   const files: Files = new Map();
@@ -158,10 +159,10 @@ export async function upload(api: GitHub, namespace: Names, workspace: string) {
   if (!files.size) throw new Error('Coverage reports contain no usable coverable lines');
   const run = integer(context.runId, 1);
   const attempt = integer(process.env.GITHUB_RUN_ATTEMPT ?? 1, 1);
-  const name = uploadName(namespace.artifact, flag, run, attempt);
+  const name = uploadName(namespace.artifact, flag, run, attempt, shard);
   const { id, digest } = await putArtifact(
     name,
-    new Map([['coverage.json.gz', uploadPayload(commit, flag, files)]]),
+    new Map([['coverage.json.gz', uploadPayload(commit, flag, files, shard)]]),
     retention(),
   );
   info(`Uploaded ${name} (artifact ${id}, SHA-256 ${digest})`);

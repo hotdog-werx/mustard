@@ -43,6 +43,7 @@ jobs:
         with:
           mode: upload
           files: lcov.info
+          shard: test
 
   test-action:
     uses: ./.github/workflows/action-tests.yaml

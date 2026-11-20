@@ -136,8 +136,12 @@ async function main() {
       const { data: current } = await api.rest.pulls.get({ ...event.repo, pull_number: event.pull.number });
       // GitHub rewrites base.sha asynchronously as the base branch moves, so
       // comparing it would silently skip required checks for an unchanged head.
-      // Checks attach to the head commit, which is all that has to match.
-      if (current.head.sha !== event.commit || current.state !== 'open') {
+      // A retargeted PR still needs results from the new base branch.
+      if (
+        current.head.sha !== event.commit ||
+        current.base.ref !== event.pull.base.ref ||
+        current.state !== 'open'
+      ) {
         info('The pull request changed while Mustard was reporting.');
         return;
       }

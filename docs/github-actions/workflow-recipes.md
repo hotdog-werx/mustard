@@ -46,8 +46,8 @@ so keep any independent test and review requirements.
 ## Combine test shards or suites
 
 Upload a report in every matrix job that runs tests. Use the same `flag` for
-shards in one suite. Give distinct suites different flags if you want separate
-checks or badge files.
+shards in one suite and a distinct, stable `shard` ID for each upload. Give
+distinct suites different flags if you want separate checks or badge files.
 
 ```yaml
 - uses: hotdog-werx/mustard@<mustard-commit-sha>
@@ -56,13 +56,16 @@ checks or badge files.
     mode: upload
     files: lcov.info
     flag: frontend
+    shard: node-${{ matrix.node }}
 ```
 
-Keep a single report job with `needs` covering all test jobs. **Re-run failed
-jobs** and **Re-run all jobs** both work. Each flag uses its uploads from the
-newest attempt that produced it, so shards that were not rerun still count. If
-you rerun only some shards of one flag, rerun all of that flag's jobs, because a
-newer attempt replaces the flag's older uploads. For path-filtered suites, see
+Include all matrix dimensions needed to distinguish uploads in the ID. Keep a
+single report job with `needs` covering all test jobs. Mustard uses the newest
+upload for each shard and keeps the previous uploads for jobs that did not
+rerun. A report-only retry can also reuse unkeyed uploads from a single attempt.
+If the same flag has unkeyed uploads across attempts, the report fails because
+it cannot tell which uploads to replace. Add shard IDs and start a new run. For
+path-filtered suites, see
 [flag settings and carryforward](../configuration.md#flags-and-components).
 
 ## Publish a badge

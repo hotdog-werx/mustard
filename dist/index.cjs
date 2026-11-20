@@ -150279,11 +150279,12 @@ function gz(data) {
 function unz(data) {
   return (0, import_node_zlib2.gunzipSync)(data, { maxOutputLength: maxBytes });
 }
-function uploadName(prefix2, flag, run, attempt) {
-  return `${prefix2}-upload-${slug(flag)}-${run}-${attempt}-${(0, import_node_crypto4.randomUUID)()}`;
+function uploadName(prefix2, flag, run, attempt, shard) {
+  const suffix = shard ? `~${slug(shard)}` : "";
+  return `${prefix2}-upload-${slug(flag)}-${run}-${attempt}-${(0, import_node_crypto4.randomUUID)()}${suffix}`;
 }
-function uploadPayload(commit, flag, files) {
-  return gz({ schema, commit, flags: [flag], files: serialize(files) });
+function uploadPayload(commit, flag, files, shard) {
+  return gz({ schema, commit, flags: [flag], shard, files: serialize(files) });
 }
 async function putArtifact(name, contents, retentionDays) {
   const directory = await (0, import_promises4.mkdtemp)((0, import_node_path.join)((0, import_node_os3.tmpdir)(), "mustard-artifact-"));
@@ -150315,7 +150316,7 @@ async function listArtifacts(api, repo, runId, name) {
     artifacts.push(...page2.data);
     if (artifacts.length > 1e3) throw new Error("Workflow run contains too many artifacts");
   }
-  return artifacts.filter((entry) => !entry.expired);
+  return artifacts;
 }
 async function boundedBody(response) {
   if (!response.ok || !response.body) throw new Error(`Artifact download failed (HTTP ${response.status})`);
@@ -150409,31 +150410,46 @@ async function loadUploads(api, event, token, namespace) {
   const all = await listArtifacts(api, event.repo, event.runId);
   const prefix2 = `${namespace.artifact}-upload-`;
   const pattern = new RegExp(
-    `^([A-Za-z0-9][A-Za-z0-9_-]{0,63})-${event.runId}-([1-9][0-9]{0,4})-[0-9a-f-]{36}$`
+    `^([A-Za-z0-9][A-Za-z0-9_-]{0,63})-${event.runId}-([1-9][0-9]{0,4})-[0-9a-f-]{36}(?:~([A-Za-z0-9][A-Za-z0-9_-]{0,63}))?$`
   );
   const candidates = all.flatMap((entry) => {
     if (!entry.name.startsWith(prefix2)) return [];
     const match = pattern.exec(entry.name.slice(prefix2.length));
     const attempt = Number(match?.[2]);
-    return match && attempt <= event.attempt ? [{ entry, flag: match[1], attempt }] : [];
+    return match && attempt <= event.attempt ? [{ entry, flag: match[1], attempt, shard: match[3] }] : [];
   });
-  const newest = /* @__PURE__ */ new Map();
-  for (const { flag, attempt } of candidates) newest.set(flag, Math.max(attempt, newest.get(flag) ?? 0));
-  const valid = candidates.filter(({ flag, attempt }) => attempt === newest.get(flag));
+  const valid = [...Map.groupBy(candidates, ({ flag }) => flag)].flatMap(([flag, uploads]) => {
+    if (uploads.some(({ shard }) => shard === void 0) && uploads.some(({ attempt }) => attempt !== uploads[0].attempt)) {
+      throw new Error(
+        `Coverage flag "${flag}" has uploads from multiple attempts without stable shard IDs. Set the shard input on each upload and start a new workflow run.`
+      );
+    }
+    return [...Map.groupBy(uploads, ({ shard }) => shard)].flatMap(([shard, history]) => {
+      if (shard === void 0) return history;
+      const attempts = Map.groupBy(history, ({ attempt }) => attempt);
+      if ([...attempts.values()].some((entries) => entries.length > 1))
+        throw new Error(
+          `Coverage flag "${flag}" has duplicate uploads for shard "${shard}". Use a distinct shard ID for each upload.`
+        );
+      return history.reduce((latest, upload2) => upload2.attempt > latest.attempt ? upload2 : latest);
+    });
+  });
+  if (valid.some(({ entry }) => entry.expired))
+    throw new Error("A coverage upload has expired. Start a new workflow run to regenerate all coverage.");
   if (valid.length > maxArtifacts || valid.reduce((size, item) => size + item.entry.size_in_bytes, 0) > maxRunBytes) {
     throw new Error("Coverage uploads exceed the per-run size or artifact count limit");
   }
   const flags = /* @__PURE__ */ new Map();
   let expanded = 0;
-  for (const { entry, flag } of valid.sort((a, b) => a.entry.id - b.entry.id)) {
+  for (const { entry, flag, shard } of valid.sort((a, b) => a.entry.id - b.entry.id)) {
     const { bytes } = await downloadArtifact(event.repo, entry, token);
     const archive = await readZip(bytes, ["coverage.json.gz"]);
     const json2 = unz(requiredEntry(archive, "coverage.json.gz"));
     expanded += json2.length;
     if (expanded > maxRunBytes) throw new Error("Coverage uploads exceed the per-run expanded size limit");
     const payload = record(JSON.parse(json2.toString("utf8")));
-    if (payload.schema !== schema || payload.commit !== event.coverageCommit || !Array.isArray(payload.flags) || payload.flags.length !== 1 || payload.flags[0] !== flag) {
-      throw new Error("Coverage upload does not match the run commit, schema, or flag");
+    if (payload.schema !== schema || payload.commit !== event.coverageCommit || !Array.isArray(payload.flags) || payload.flags.length !== 1 || payload.flags[0] !== flag || payload.shard !== shard) {
+      throw new Error("Coverage upload does not match the run commit, schema, flag, or shard");
     }
     flags.set(flag, mergeFiles(flags.get(flag) ?? /* @__PURE__ */ new Map(), deserialize(payload.files)));
     assertBudget(flags.values());
@@ -152116,7 +152132,9 @@ function bounded(value, fallback, max) {
   return value === void 0 ? fallback : integer(value, 0, max);
 }
 function pathMatcher(pattern) {
-  if (/^\^|\$$|\.\*|\.\+|\\[.dws]/.test(pattern)) {
+  const anchored = pattern.startsWith("^") || pattern.endsWith("$");
+  const globStar = /(^|[^.])\*/.test(pattern);
+  if (anchored || !globStar && /\.\*|\.\+|\\[.dws]/.test(pattern)) {
     let regex;
     try {
       regex = new RegExp(pattern.startsWith("^") ? pattern : `^(?:${pattern})`);
@@ -152657,9 +152675,8 @@ var issuer = "https://token.actions.githubusercontent.com";
 function unsupported(error2) {
   const code = statusCode(error2);
   const message2 = error2 instanceof Error ? error2.message : "";
-  return [403, 404, 422].includes(code ?? 0) && /not supported|not available|not enabled|enterprise cloud|make (?:this|the) repository public|require[s]? a public/i.test(
-    message2
-  ) && !/token|permission|not accessible|scope/i.test(message2);
+  const planLimit = /not supported|not available|not enabled|enterprise cloud|make (?:this|the) repository public|require[s]? a public/i;
+  return [403, 404, 422].includes(code ?? 0) && planLimit.test(message2) && /attestations?|user-owned private repositor(?:y|ies)/i.test(message2) && !/token|permission|not accessible|scope/i.test(message2);
 }
 async function publicRepository(api, repo) {
   const { data } = await api.rest.repos.get(repo);
@@ -152788,11 +152805,9 @@ var Provenance = class {
       });
       entries = data.attestations ?? [];
     } catch (error2) {
-      if (statusCode(error2) === 404) entries = [];
-      else if (auto && unsupported(error2) && !await this.isPublic()) return this.fallBack();
-      else throw error2;
+      if (auto && unsupported(error2) && !await this.isPublic()) return this.fallBack();
+      throw error2;
     }
-    if (!entries.length && auto && !await this.isPublic()) return this.fallBack();
     if (!entries.length) throw new Error("No attestation found for the coverage artifact");
     this.verifier ??= this.isPublic().then((isPublic) => createVerifier(!isPublic));
     const verifier = await this.verifier;
@@ -152833,7 +152848,7 @@ async function findBaseline(api, event, start, token, config, namespace) {
         const artifacts = await listArtifacts(api, event.repo, run.id);
         for (let attempt = run.run_attempt ?? 1; attempt >= 1; attempt--) {
           const name = reportArtifactName(namespace, commit, attempt);
-          const artifact = artifacts.find((entry) => entry.name === name);
+          const artifact = artifacts.find((entry) => entry.name === name && !entry.expired);
           if (!artifact) continue;
           const { bytes, digest } = await downloadArtifact(event.repo, artifact, token);
           await provenance.verify(name, digest, run, attempt);
@@ -153746,6 +153761,7 @@ async function upload(api, namespace, workspace) {
   const { normalize: normalize3, unmatched } = pathResolver(workspace, root, fixes);
   const format = getInput("format") || "auto";
   const flag = slug(getInput("flag") || "default");
+  const shard = getInput("shard") || void 0;
   const fileInput = getInput("files");
   const paths = inputs(fileInput, workspace);
   const files = /* @__PURE__ */ new Map();
@@ -153773,10 +153789,10 @@ async function upload(api, namespace, workspace) {
   if (!files.size) throw new Error("Coverage reports contain no usable coverable lines");
   const run = integer(context2.runId, 1);
   const attempt = integer(process.env.GITHUB_RUN_ATTEMPT ?? 1, 1);
-  const name = uploadName(namespace.artifact, flag, run, attempt);
+  const name = uploadName(namespace.artifact, flag, run, attempt, shard);
   const { id, digest } = await putArtifact(
     name,
-    /* @__PURE__ */ new Map([["coverage.json.gz", uploadPayload(commit, flag, files)]]),
+    /* @__PURE__ */ new Map([["coverage.json.gz", uploadPayload(commit, flag, files, shard)]]),
     retention()
   );
   info(`Uploaded ${name} (artifact ${id}, SHA-256 ${digest})`);
@@ -154072,7 +154088,7 @@ async function main() {
   if (event.base && (!event.fork || mode === "comment")) {
     if (event.pull) {
       const { data: current } = await api.rest.pulls.get({ ...event.repo, pull_number: event.pull.number });
-      if (current.head.sha !== event.commit || current.state !== "open") {
+      if (current.head.sha !== event.commit || current.base.ref !== event.pull.base.ref || current.state !== "open") {
         info("The pull request changed while Mustard was reporting.");
         return;
       }

@@ -51,12 +51,19 @@ function unz(data: Buffer): Buffer {
   return gunzipSync(data, { maxOutputLength: maxBytes });
 }
 
-export function uploadName(prefix: string, flag: string, run: number, attempt: number): string {
-  return `${prefix}-upload-${slug(flag)}-${run}-${attempt}-${randomUUID()}`;
+export function uploadName(
+  prefix: string,
+  flag: string,
+  run: number,
+  attempt: number,
+  shard?: string,
+): string {
+  const suffix = shard ? `~${slug(shard)}` : '';
+  return `${prefix}-upload-${slug(flag)}-${run}-${attempt}-${randomUUID()}${suffix}`;
 }
 
-export function uploadPayload(commit: string, flag: string, files: Files) {
-  return gz({ schema, commit, flags: [flag], files: serialize(files) });
+export function uploadPayload(commit: string, flag: string, files: Files, shard?: string) {
+  return gz({ schema, commit, flags: [flag], shard, files: serialize(files) });
 }
 
 export async function putArtifact(
@@ -99,7 +106,7 @@ export async function listArtifacts(
     artifacts.push(...page.data);
     if (artifacts.length > 1000) throw new Error('Workflow run contains too many artifacts');
   }
-  return artifacts.filter((entry) => !entry.expired);
+  return artifacts;
 }
 
 async function boundedBody(response: Response): Promise<Buffer> {
@@ -203,21 +210,36 @@ export async function loadUploads(
   const all = await listArtifacts(api, event.repo, event.runId);
   const prefix = `${namespace.artifact}-upload-`;
   const pattern = new RegExp(
-    `^([A-Za-z0-9][A-Za-z0-9_-]{0,63})-${event.runId}-([1-9][0-9]{0,4})-[0-9a-f-]{36}$`,
+    `^([A-Za-z0-9][A-Za-z0-9_-]{0,63})-${event.runId}-([1-9][0-9]{0,4})-[0-9a-f-]{36}(?:~([A-Za-z0-9][A-Za-z0-9_-]{0,63}))?$`,
   );
   const candidates = all.flatMap((entry) => {
     if (!entry.name.startsWith(prefix)) return [];
     const match = pattern.exec(entry.name.slice(prefix.length));
     const attempt = Number(match?.[2]);
-    return match && attempt <= event.attempt ? [{ entry, flag: match[1], attempt }] : [];
+    return match && attempt <= event.attempt ? [{ entry, flag: match[1], attempt, shard: match[3] }] : [];
   });
-  // "Re-run failed jobs" keeps earlier attempts' artifacts but does not rerun
-  // jobs that succeeded. Use each flag's newest attempt so a retried report job
-  // still sees its shards, while a flag re-uploaded in this attempt replaces
-  // its older data instead of merging with it.
-  const newest = new Map<string, number>();
-  for (const { flag, attempt } of candidates) newest.set(flag, Math.max(attempt, newest.get(flag) ?? 0));
-  const valid = candidates.filter(({ flag, attempt }) => attempt === newest.get(flag));
+  const valid = [...Map.groupBy(candidates, ({ flag }) => flag)].flatMap(([flag, uploads]) => {
+    // Legacy artifacts cannot distinguish a retried shard from one that first uploaded on retry.
+    if (
+      uploads.some(({ shard }) => shard === undefined) &&
+      uploads.some(({ attempt }) => attempt !== uploads[0].attempt)
+    ) {
+      throw new Error(
+        `Coverage flag "${flag}" has uploads from multiple attempts without stable shard IDs. Set the shard input on each upload and start a new workflow run.`,
+      );
+    }
+    return [...Map.groupBy(uploads, ({ shard }) => shard)].flatMap(([shard, history]) => {
+      if (shard === undefined) return history;
+      const attempts = Map.groupBy(history, ({ attempt }) => attempt);
+      if ([...attempts.values()].some((entries) => entries.length > 1))
+        throw new Error(
+          `Coverage flag "${flag}" has duplicate uploads for shard "${shard}". Use a distinct shard ID for each upload.`,
+        );
+      return history.reduce((latest, upload) => (upload.attempt > latest.attempt ? upload : latest));
+    });
+  });
+  if (valid.some(({ entry }) => entry.expired))
+    throw new Error('A coverage upload has expired. Start a new workflow run to regenerate all coverage.');
   if (
     valid.length > maxArtifacts ||
     valid.reduce((size, item) => size + item.entry.size_in_bytes, 0) > maxRunBytes
@@ -226,7 +248,7 @@ export async function loadUploads(
   }
   const flags: FlagFiles = new Map();
   let expanded = 0;
-  for (const { entry, flag } of valid.sort((a, b) => a.entry.id - b.entry.id)) {
+  for (const { entry, flag, shard } of valid.sort((a, b) => a.entry.id - b.entry.id)) {
     const { bytes } = await downloadArtifact(event.repo, entry, token);
     const archive = await readZip(bytes, ['coverage.json.gz']);
     const json = unz(requiredEntry(archive, 'coverage.json.gz'));
@@ -238,9 +260,10 @@ export async function loadUploads(
       payload.commit !== event.coverageCommit ||
       !Array.isArray(payload.flags) ||
       payload.flags.length !== 1 ||
-      payload.flags[0] !== flag
+      payload.flags[0] !== flag ||
+      payload.shard !== shard
     ) {
-      throw new Error('Coverage upload does not match the run commit, schema, or flag');
+      throw new Error('Coverage upload does not match the run commit, schema, flag, or shard');
     }
     flags.set(flag, mergeFiles(flags.get(flag) ?? new Map(), deserialize(payload.files)));
     assertBudget(flags.values());

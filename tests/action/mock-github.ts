@@ -107,6 +107,7 @@ github.get(/.*/).reply((request: Request) => {
     const current = pull(fork);
     if (process.env.MUSTARD_TEST_PR_UPDATED === 'true') current.head.sha = merge;
     if (process.env.MUSTARD_TEST_BASE_MOVED === 'true') current.base.sha = 'f'.repeat(40);
+    if (process.env.MUSTARD_TEST_PR_RETARGETED === 'true') current.base.ref = 'release/1.x';
     return [200, current];
   }
   if (route.startsWith('/compare/')) {
@@ -171,6 +172,12 @@ github.get(/.*/).reply((request: Request) => {
     );
     if (process.env.MUSTARD_TEST_BAD_DIGEST === 'true' && artifacts.length)
       artifacts[0].digest = 'sha256:fixture-mismatch';
+    const expiredShard = process.env.MUSTARD_TEST_EXPIRED_SHARD;
+    if (expiredShard) {
+      for (const artifact of artifacts) {
+        if (artifact.name.endsWith(`~${expiredShard}`)) artifact.expired = true;
+      }
+    }
     return [200, { total_count: artifacts.length, artifacts }];
   }
   if (route === '/issues/5/comments') return [200, []];

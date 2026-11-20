@@ -300,6 +300,9 @@ test('matches Codecov folder, glob, and regular-expression paths', () => {
     ['tests', ['tests/x.py', 'tests'], ['tests_util.py', 'src/tests/x.py']],
     ['./src/api', ['src/api/v1.ts'], ['src/apis.ts']],
     ['**/*.pb.go', ['a/b.pb.go'], ['a/b.go']],
+    ['**/*.test.*', ['a/b.test.ts'], ['a/b.spec.ts']],
+    ['src/**/.*', ['src/deep/.generated'], ['src/deep/generated']],
+    ['src/*.*', ['src/file.ts'], ['src/deep/file.ts', 'src/file']],
     ['^src/.*\\.ts$', ['src/a.ts'], ['src/a.tsx', 'lib/src/a.ts']],
     ['[a-z]+/test_.*', ['pkg/test_one.rb'], ['pkg/one.rb', 'PKG/test_one.rb']],
   ];

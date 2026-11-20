@@ -33,6 +33,7 @@ jobs:
         with:
           mode: upload
           files: coverage.xml
+          shard: test
 
   coverage:
     needs: [test]

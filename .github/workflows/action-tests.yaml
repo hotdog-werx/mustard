@@ -51,6 +51,7 @@ jobs:
           github-token: mustard-test-github-token
           mode: upload
           files: lcov.info
+          shard: manifest-test
           strict-paths: 'true'
 
       - name: Report coverage using the default mode

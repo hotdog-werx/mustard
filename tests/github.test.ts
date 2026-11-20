@@ -470,8 +470,10 @@ test('auto attestation policy falls back only where GitHub cannot offer attestat
   );
   const notFound = Object.assign(new Error('Not Found'), { status: 404 });
   const permission = Object.assign(new Error('Resource not accessible by integration'), { status: 403 });
+  const unavailableResource = Object.assign(new Error('Resource not available'), { status: 404 });
   assert.equal(unsupported(plan), true);
   assert.equal(unsupported(permission), false);
+  assert.equal(unsupported(unavailableResource), false);
   function withError(error: Error, visibility = 'private') {
     const request = mock.fn(async () => {
       throw error;
@@ -481,22 +483,35 @@ test('auto attestation policy falls back only where GitHub cannot offer attestat
     } as unknown as GitHub;
     return { api, request };
   }
-  for (const error of [plan, notFound]) {
-    const unavailable = withError(error);
-    const optional = new Provenance(unavailable.api, event, readConfig());
-    await optional.verify('report', 'digest', run);
-    await optional.verify('another-report', 'digest', run);
-    assert.equal(unavailable.request.mock.callCount(), 1);
-    const strict = new Provenance(unavailable.api, event, readConfig('baseline: {attestations: required}'));
-    await assert.rejects(strict.verify('report', 'digest', run), /not available|No attestation/);
-  }
+  const unavailable = withError(plan);
+  const optional = new Provenance(unavailable.api, event, readConfig());
+  await optional.verify('report', 'digest', run);
+  await optional.verify('another-report', 'digest', run);
+  assert.equal(unavailable.request.mock.callCount(), 1);
+  const strict = new Provenance(unavailable.api, event, readConfig('baseline: {attestations: required}'));
+  await assert.rejects(strict.verify('report', 'digest', run), /not available/);
   // Every public repository supports attestations, so a missing one is never excused.
   const publicRepo = new Provenance(withError(notFound, 'public').api, event, readConfig());
-  await assert.rejects(publicRepo.verify('report', 'digest', run), /No attestation found/);
+  await assert.rejects(publicRepo.verify('report', 'digest', run), /Not Found/);
   const publicPlan = new Provenance(withError(plan, 'public').api, event, readConfig());
   await assert.rejects(publicPlan.verify('report', 'digest', run), /not available/);
   const forbidden = new Provenance(withError(permission).api, event, readConfig());
   await assert.rejects(forbidden.verify('report', 'digest', run), /not accessible/);
+});
+
+test('a missing or inaccessible private attestation never disables checks on later candidates', async (t) => {
+  const listAttestations = t.mock.fn(async ({ subject_digest }: { subject_digest: string }) => {
+    if (subject_digest === 'sha256:inaccessible')
+      throw Object.assign(new Error('Not Found'), { status: 404 });
+    return { data: { attestations: [] } };
+  });
+  const api = {
+    rest: { repos: { listAttestations, get: async () => ({ data: { visibility: 'private' } }) } },
+  } as unknown as GitHub;
+  const provenance = new Provenance(api, event, readConfig());
+  await assert.rejects(provenance.verify('report', 'inaccessible', run), /Not Found/);
+  await assert.rejects(provenance.verify('another-report', 'unsigned', run), /No attestation found/);
+  assert.equal(listAttestations.mock.callCount(), 2);
 });
 
 test('reports a useful failure when GitHub refuses to download an artifact', async () => {

@@ -70,7 +70,9 @@ function bounded(value: unknown, fallback: number, max: number) {
 // Codecov path patterns are globs, regular expressions, or plain folder/file
 // paths. A plain path matches itself and everything below it.
 function pathMatcher(pattern: string): (path: string) => boolean {
-  if (/^\^|\$$|\.\*|\.\+|\\[.dws]/.test(pattern)) {
+  const anchored = pattern.startsWith('^') || pattern.endsWith('$');
+  const globStar = /(^|[^.])\*/.test(pattern);
+  if (anchored || (!globStar && /\.\*|\.\+|\\[.dws]/.test(pattern))) {
     let regex: RegExp;
     try {
       regex = new RegExp(pattern.startsWith('^') ? pattern : `^(?:${pattern})`);

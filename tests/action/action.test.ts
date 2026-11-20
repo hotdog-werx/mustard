@@ -241,7 +241,7 @@ test('upload uses the artifact service and writes a normalized archive for the P
   });
 });
 
-test('report compares a PR to a push baseline and excludes uploads from the previous attempt', async (t) => {
+test('report compares a PR to a push baseline and replaces an earlier upload for the same shard', async (t) => {
   const fixture = scenario(t);
   fixture.writeCoverage(fullCoverage);
   ok(fixture.run({ mode: 'upload', files: 'lcov.info' }, { MUSTARD_TEST_EVENT: 'push' }));
@@ -249,9 +249,9 @@ test('report compares a PR to a push baseline and excludes uploads from the prev
   assert.equal(baseline.outputs['project-coverage'], '100.00%');
   assert.equal(baseline.outputs['report-artifact-id'], '2');
   assert.equal(checks(fixture.state()).length, 0);
-  ok(fixture.run({ mode: 'upload', files: 'lcov.info' }, { MUSTARD_TEST_ATTEMPT: '1' }));
+  ok(fixture.run({ mode: 'upload', files: 'lcov.info', shard: 'unit' }, { MUSTARD_TEST_ATTEMPT: '1' }));
   fixture.writeCoverage(changedCoverage);
-  ok(fixture.run({ mode: 'upload', files: 'lcov.info' }));
+  ok(fixture.run({ mode: 'upload', files: 'lcov.info', shard: 'unit' }));
   const report = ok(fixture.run());
   assert.equal(report.outputs['baseline-sha'], base);
   assert.equal(report.outputs['project-coverage'], '66.66%');
@@ -539,12 +539,82 @@ test('a rerun of only the report job uses uploads from the earlier attempt', (t)
   assert.doesNotMatch(report.summary, /No coverage uploads found/);
 });
 
+test('rerunning one shard keeps the other shard’s uncovered lines in the patch check', (t) => {
+  const fixture = scenario(t);
+  const first = { MUSTARD_TEST_ATTEMPT: '1' };
+  const upload = { mode: 'upload', flag: 'unit' };
+  fixture.writeCoverage('SF:src/example.ts\nDA:1,0\nend_of_record\n');
+  ok(fixture.run({ ...upload, shard: 'fast' }, first));
+  fixture.writeCoverage('SF:src/example.ts\nDA:2,0\nend_of_record\n');
+  ok(fixture.run({ ...upload, shard: 'slow' }, first));
+  fixture.writeCoverage('SF:src/example.ts\nDA:1,1\nend_of_record\n');
+  ok(fixture.run({ ...upload, shard: 'fast' }));
+
+  const report = ok(fixture.run());
+  assert.equal(report.outputs['patch-total'], '2');
+  assert.equal(report.outputs['patch-coverage'], '50.00%');
+  assert.equal(report.outputs['patch-status'], 'failure');
+});
+
+test('an ambiguous retry without shard IDs fails before publishing a patch check', (t) => {
+  const fixture = scenario(t);
+  fixture.writeCoverage(changedCoverage);
+  ok(fixture.run({ mode: 'upload' }, { MUSTARD_TEST_ATTEMPT: '1' }));
+  fixture.writeCoverage('SF:src/example.ts\nDA:1,1\nend_of_record\n');
+  ok(fixture.run({ mode: 'upload' }));
+
+  const report = fixture.run();
+  assert.equal(report.status, 1, report.diagnostics);
+  assert.match(report.stdout, /multiple attempts without stable shard IDs/);
+  assert.equal(checks(fixture.state()).length, 0);
+});
+
+test('rejects duplicate shard IDs in the same attempt before publishing checks', (t) => {
+  const fixture = scenario(t);
+  fixture.writeCoverage(changedCoverage);
+  const upload = { mode: 'upload', shard: 'linux' };
+  ok(fixture.run(upload, { MUSTARD_TEST_ATTEMPT: '1' }));
+  ok(fixture.run(upload, { MUSTARD_TEST_ATTEMPT: '1' }));
+  ok(fixture.run(upload));
+
+  const report = fixture.run();
+  assert.equal(report.status, 1, report.diagnostics);
+  assert.match(report.stdout, /duplicate uploads for shard "linux"/);
+  assert.equal(checks(fixture.state()).length, 0);
+});
+
+test('an expired shard stops a partial retry from publishing incomplete coverage', (t) => {
+  const fixture = scenario(t);
+  fixture.writeCoverage(changedCoverage);
+  ok(fixture.run({ mode: 'upload', shard: 'slow' }, { MUSTARD_TEST_ATTEMPT: '1' }));
+  fixture.writeCoverage(fullCoverage);
+  ok(fixture.run({ mode: 'upload', shard: 'fast' }));
+
+  const report = fixture.run({}, { MUSTARD_TEST_EXPIRED_SHARD: 'slow' });
+  assert.equal(report.status, 1, report.diagnostics);
+  assert.match(report.stdout, /upload has expired/);
+  assert.equal(checks(fixture.state()).length, 0);
+});
+
 test('publishes checks when only the PR base moved during the run', (t) => {
   const fixture = scenario(t);
   fixture.writeCoverage(fullCoverage);
   ok(fixture.run({ mode: 'upload' }));
   ok(fixture.run({}, { MUSTARD_TEST_BASE_MOVED: 'true' }));
   assert.ok(checks(fixture.state()).length > 0);
+});
+
+test('does not publish stale results after the PR is retargeted with the same head', (t) => {
+  const fixture = scenario(t);
+  fixture.writeCoverage(fullCoverage);
+  ok(fixture.run({ mode: 'upload' }));
+  const report = ok(fixture.run({}, { MUSTARD_TEST_PR_RETARGETED: 'true' }));
+  assert.match(report.stdout, /pull request changed while Mustard was reporting/);
+  assert.equal(checks(fixture.state()).length, 0);
+  assert.equal(
+    fixture.state().calls.some((call) => call.method === 'POST' && call.route.endsWith('/comments')),
+    false,
+  );
 });
 
 test('does not publish stale checks after the PR head changes', (t) => {
