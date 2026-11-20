@@ -285,6 +285,37 @@ test('report compares a PR to a push baseline and replaces an earlier upload for
   assert.match(reportArchive.get('meta.json')?.toString() ?? '', /"run_attempt":2/);
 });
 
+test('publishes the patch verdict and PR comment when GitHub cannot append annotations', (t) => {
+  const fixture = scenario(t);
+  const lines = Array.from({ length: 75 }, (_, index) => index + 1);
+  fixture.writeSource(lines.map((line) => `line ${line}`).join('\n'));
+  fixture.writeCoverage(
+    `SF:src/example.ts\n${lines.map((line) => `DA:${line},0`).join('\n')}\nend_of_record\n`,
+  );
+  ok(fixture.run({ mode: 'upload' }));
+
+  const report = ok(
+    fixture.run(
+      {},
+      {
+        MUSTARD_TEST_LARGE_DIFF: 'true',
+        MUSTARD_TEST_DENY: 'append-annotations',
+      },
+    ),
+  );
+  assert.equal(report.outputs['patch-status'], 'failure');
+  assert.equal(report.outputs['patch-total'], '75');
+  assert.match(report.stdout, /GitHub would not append 25 more annotations/);
+
+  const state = fixture.state();
+  const patch = checks(state).find((call) => call.body?.name === 'mustard/patch')?.body;
+  assert.ok(patch);
+  assert.equal(patch.status, 'completed');
+  assert.equal(patch.conclusion, 'failure');
+  assert.equal((patch.output as { annotations: unknown[] }).annotations.length, 50);
+  assert.ok(state.calls.some((call) => call.route === '/issues/5/comments' && call.method === 'POST'));
+});
+
 test('fork report emits outputs without writes and comment recomputes with trusted configuration', (t) => {
   const fixture = scenario(t);
   fixture.writeCoverage(changedCoverage);

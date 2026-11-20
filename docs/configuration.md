@@ -25,7 +25,9 @@ to check spelling and value types.
 - `coverage.precision` and `coverage.round` control displayed percentages. Gates
   use the unrounded coverage. `coverage.range` controls badge colors.
 - `annotations.enabled` defaults to true. `annotations.max` defaults to 200.
-  Mustard sends up to 50 annotations per Checks API request.
+  Mustard sends up to 50 annotations per Checks API request and publishes the
+  check result with the first batch. If GitHub cannot find the check to append
+  another batch, the workflow summary still shows the coverage details.
 - `require_uploads: true` fails coverage checks when no upload is present for
   the current attempt. The default is neutral.
 - Set top-level `indirect_changes: fail` to fail the default project check when

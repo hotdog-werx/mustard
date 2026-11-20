@@ -114,6 +114,11 @@ github.get(/.*/).reply((request: Request) => {
     return [200, current];
   }
   if (route.startsWith('/compare/')) {
+    const additions = process.env.MUSTARD_TEST_LARGE_DIFF === 'true' ? 75 : 2;
+    const patch =
+      additions > 2
+        ? `@@ -0,0 +1,${additions} @@\n${Array.from({ length: additions }, (_, index) => `+line ${index + 1}`).join('\n')}`
+        : '@@ -1,2 +1,2 @@\n-old\n-old\n+one\n+two';
     return [
       200,
       {
@@ -122,8 +127,8 @@ github.get(/.*/).reply((request: Request) => {
           {
             filename: 'src/example.ts',
             status: 'modified',
-            additions: process.env.MUSTARD_TEST_INCOMPLETE_DIFF === 'true' ? 3 : 2,
-            patch: '@@ -1,2 +1,2 @@\n-old\n-old\n+one\n+two',
+            additions: process.env.MUSTARD_TEST_INCOMPLETE_DIFF === 'true' ? 3 : additions,
+            patch,
           },
         ],
       },
@@ -234,6 +239,8 @@ for (const method of ['POST', 'PATCH'] as const) {
     if (route === '/issues/5/comments' && process.env.MUSTARD_TEST_DENY === 'comments')
       return [403, { message: 'Resource not accessible by integration' }];
     if (route === '/check-runs') return [201, { id: 70 }];
+    if (route === '/check-runs/70' && process.env.MUSTARD_TEST_DENY === 'append-annotations')
+      return [404, { message: 'Not Found' }];
     if (route === '/check-runs/70' || route === '/issues/5/comments') return [200, { id: 90 }];
     return noRoute(method, route);
   });

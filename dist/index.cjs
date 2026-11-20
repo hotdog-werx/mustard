@@ -153229,6 +153229,7 @@ function filePercent(path4, lines) {
 }
 
 // src/publish.ts
+var checkAnnotationBatchSize = 50;
 function escapeMarkdown(value) {
   return value.replace(new RegExp("\\p{Cc}", "gu"), " ").replace(/[^\p{L}\p{N} /]/gu, (char) => `&#${char.codePointAt(0)};`);
 }
@@ -153388,15 +153389,24 @@ async function writeChecks(api, namespace, display) {
         external_id: `${event.runId}:${event.attempt}:${name}`,
         details_url,
         output: { ...output, annotations: first },
-        ...chunks.length ? { status: "in_progress" } : { status: "completed", conclusion: check2.conclusion }
+        status: "completed",
+        conclusion: check2.conclusion
       });
       for (const [index, batch] of chunks.entries()) {
-        await api.rest.checks.update({
-          ...event.repo,
-          check_run_id: run.id,
-          output: { ...output, annotations: batch },
-          ...index === chunks.length - 1 ? { status: "completed", conclusion: check2.conclusion } : {}
-        });
+        try {
+          await api.rest.checks.update({
+            ...event.repo,
+            check_run_id: run.id,
+            output: { ...output, annotations: batch }
+          });
+        } catch (error2) {
+          if (statusCode(error2) !== 404) throw error2;
+          const remaining = annotations.length - checkAnnotationBatchSize * (index + 1);
+          warning(
+            `GitHub would not append ${remaining} more annotations to ${name}. See the workflow summary for uncovered lines.`
+          );
+          break;
+        }
       }
     } catch (error2) {
       if (statusCode(error2) === 403)
@@ -153409,8 +153419,8 @@ async function writeChecks(api, namespace, display) {
 }
 function annotationBatches(annotations) {
   const result = [];
-  for (let index = 0; index < annotations.length; index += 50)
-    result.push(annotations.slice(index, index + 50));
+  for (let index = 0; index < annotations.length; index += checkAnnotationBatchSize)
+    result.push(annotations.slice(index, index + checkAnnotationBatchSize));
   return result;
 }
 async function authenticatedLogin(api) {

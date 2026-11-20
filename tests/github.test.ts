@@ -372,9 +372,15 @@ test('attaches checks to the PR head and batches annotations across API updates'
   const api = { rest: { checks: { create, update } } } as unknown as GitHub;
   await writeChecks(api, names(''), { report, config, event, configChanged: false, hasUploads: true });
   assert.equal(create.mock.calls[1].arguments[0].head_sha, head);
-  assert.equal(create.mock.calls[1].arguments[0].status, 'in_progress');
+  assert.equal(create.mock.calls[1].arguments[0].status, 'completed');
+  assert.equal(create.mock.calls[1].arguments[0].conclusion, 'failure');
   assert.equal(update.mock.calls[1].arguments[0].check_run_id, 55);
-  assert.equal(update.mock.calls[1].arguments[0].conclusion, 'failure');
+  assert.deepEqual(
+    update.mock.calls.map(
+      ({ arguments: [params] }) => (params.output as { annotations: unknown[] }).annotations.length,
+    ),
+    [50, 1],
+  );
 });
 
 test('escapes PR comment data and updates only the Actions bot sticky comment', async () => {
