@@ -1,0 +1,40 @@
+{
+  "name": "mustard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --platform=node --target=node24 --format=cjs --legal-comments=external --outfile=dist/index.cjs",
+    "check": "tsc --noEmit",
+    "lint": "biome check --linter-enabled=true --formatter-enabled=true --assist-enabled=false src tests",
+    "test": "node --experimental-test-coverage --test tests/*.test.ts",
+    "coverage": "node --experimental-test-coverage --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=lcov.info tests/*.test.ts",
+    "format": "biome format --write src tests",
+    "test:action": "npm run build && node --test tests/action/*.test.ts"
+  },
+  "dependencies": {
+    "@actions/artifact": "6.3.1",
+    "@actions/attest": "3.2.0",
+    "@actions/core": "3.0.1",
+    "@actions/github": "9.1.1",
+    "@sigstore/bundle": "5.0.1",
+    "@sigstore/verify": "4.1.3",
+    "picomatch": "4.0.7",
+    "saxes": "6.0.0",
+    "sigstore": "5.0.1",
+    "yaml": "2.9.1",
+    "yauzl": "3.4.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.8",
+    "@types/node": "24.19.2",
+    "@types/picomatch": "4.0.3",
+    "@types/yauzl": "3.4.0",
+    "esbuild": "0.28.2",
+    "nock": "15.0.6",
+    "typescript": "7.0.2"
+  }
+}

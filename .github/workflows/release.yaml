@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: mustard-release
+
+jobs:
+  publish:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: mise.toml
+      - run: npm ci
+      - run: npm run check
+      - run: npm run lint
+      - run: npm test
+      - run: npm run test:action
+      - run: git ls-files --error-unmatch dist/index.cjs dist/index.cjs.LEGAL.txt
+      - run: git diff --exit-code -- dist/
+      - name: Package release
+        id: package
+        shell: bash
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Expected a stable x.y.z package version." >&2
+            exit 1
+          fi
+          tag="v$version"
+          major="v${version%%.*}"
+          asset="mustard-$tag.zip"
+          git archive --format=zip --output="$asset" HEAD action.yml dist README.md docs mustard.schema.json
+          printf 'tag=%s\nmajor=%s\nasset=%s\n' "$tag" "$major" "$asset" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.package.outputs.asset }}
+      - name: Publish immutable version and advance the major tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.package.outputs.tag }}
+          MAJOR: ${{ steps.package.outputs.major }}
+          ASSET: ${{ steps.package.outputs.asset }}
+        run: |
+          if tagged_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha 2>/dev/null); then
+            if [[ "$tagged_sha" != "$GITHUB_SHA" ]]; then
+              echo "Version tag already points to another commit." >&2
+              exit 1
+            fi
+          fi
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" "$ASSET" --target "$GITHUB_SHA" --generate-notes
+          fi
+          tagged_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)
+          [[ "$tagged_sha" == "$GITHUB_SHA" ]]
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq '.[].tag_name' | { grep -E "^$MAJOR\.[0-9]+\.[0-9]+$" || true; } | sort -V | tail -1)
+          if [[ "$latest" != "$TAG" ]]; then
+            exit 0
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$MAJOR" >/dev/null 2>&1; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$MAJOR" -f sha="$tagged_sha" -F force=true
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$MAJOR" -f sha="$tagged_sha"
+          fi

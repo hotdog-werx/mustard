@@ -1,0 +1,40 @@
+[settings]
+experimental = true
+
+[tools]
+node = "24.22.3"
+uv = "0.12.24"
+"pipx:uv-toolbox" = "0.4.1"
+dprint = "0.55.1"
+actionlint = "1.7.11"
+"pipx:zensical" = "0.0.62"
+
+[[hooks.postinstall]]
+run = "uv-toolbox install"
+
+[[hooks.postinstall]]
+run = "uv-toolbox exec --env repolish -- repolish link"
+
+[[hooks.postinstall]]
+run = "mise run workspace:setup-hook"
+
+[task_config]
+includes = [
+  "mise-tasks",
+  ".repolish/hotdogwerx-devkit-workspace/mise-tasks",
+  ".repolish/hotdogwerx-devkit-workspace/mise-tasks.toml",
+]
+
+[tasks.setup]
+run = "npm ci"
+
+[tasks.check]
+run = ["npm run check", "npm run lint", "npm test", "npm run test:action"]
+
+[tasks.test-action]
+run = "npm run test:action"
+
+# Devkit 0.1.4 invokes this task unconditionally in its repo-checks workflow.
+# uv-toolbox provisions the workspace provider in the postinstall hook.
+[tasks."python:uv-sync"]
+run = "uv-toolbox install"

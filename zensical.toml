@@ -1,0 +1,17 @@
+[project]
+site_name = "Mustard"
+site_description = "Project and patch coverage using GitHub Actions artifacts"
+site_url = "https://hotdog-werx.github.io/mustard/"
+repo_url = "https://github.com/hotdog-werx/mustard"
+repo_name = "hotdog-werx/mustard"
+nav = [
+  { Home = "index.md" },
+  { Configuration = "configuration.md" },
+]
+
+[project.theme]
+features = ["content.code.copy", "navigation.footer", "search.highlight"]
+
+[project.theme.palette]
+primary = "amber"
+accent = "amber"

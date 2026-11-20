@@ -1,0 +1,10 @@
+providers:
+  workspace:
+    cli: devkit-workspace-link
+    context_overrides:
+      devkit_ref: 0de802099634a9675c03f564ad0b84711c709693
+
+providers_order: [workspace]
+
+post_process:
+  - mise run workspace:dprint:format

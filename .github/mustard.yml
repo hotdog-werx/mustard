@@ -1,0 +1,12 @@
+require_uploads: true
+ignore:
+  - tests/**
+  - dist/**
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+    patch:
+      default:
+        target: 100%

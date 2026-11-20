@@ -1,0 +1,15 @@
+# Action tests
+
+Run `mise run test-action` after installing dependencies. The suite builds the
+action, reads its entrypoint and input defaults from `action.yml`, and executes
+the bundle with runner-style event, input, output, and summary files. It covers
+upload, report, and fork comment workflows, including a real toolkit ZIP upload
+and download round trip over mocked HTTP. The mocks block external requests and
+check the artifact digest sent by the toolkit.
+
+CI also runs [the action workflow](../../.github/workflows/action-tests.yaml).
+It invokes `uses: ./` for all three modes and checks the outputs and step
+conclusion through GitHub's workflow expressions. A test preload supplies
+synthetic GitHub events and API responses. These tests require no Docker or
+GitHub credentials. Mustard's regular CI separately exercises the GitHub-hosted
+artifact service when it reports this repository's coverage.
