@@ -1,0 +1,3 @@
+mode: count
+example.org/m/src/example.go:2.15,4.2 1 3
+example.org/m/src/example.go:5.14,5.26 1 0

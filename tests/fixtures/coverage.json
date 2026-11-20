@@ -1,0 +1,16 @@
+{
+  "meta": {
+    "format": 3,
+    "version": "7.13.2",
+    "branch_coverage": true
+  },
+  "files": {
+    "src/example.py": {
+      "executed_lines": [2],
+      "missing_lines": [4],
+      "excluded_lines": [],
+      "executed_branches": [[2, -1]],
+      "missing_branches": [[2, 4]]
+    }
+  }
+}

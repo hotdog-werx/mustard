@@ -1,0 +1,66 @@
+name: Mustard
+description: Gate project and patch coverage using GitHub Actions artifacts.
+branding:
+  icon: check-circle
+  color: yellow
+inputs:
+  mode:
+    description: 'Action mode: upload, report, or comment.'
+    default: report
+  github-token:
+    description: GitHub Actions token with the job permissions described in the README.
+    default: ${{ github.token }}
+  files:
+    description: Newline-separated coverage file globs relative to GITHUB_WORKSPACE.
+  format:
+    description: 'Coverage format: auto, cobertura, lcov, coveragepy-json, go, or jacoco.'
+    default: auto
+  flag:
+    description: Name of the coverage flag for this upload.
+    default: default
+  shard:
+    description: Stable ID for one upload within a flag, used to preserve other shards across retries.
+  root:
+    description: Path prefix to remove from coverage paths.
+  path-fixes:
+    description: Newline-separated from:to or from::to coverage path rewrites.
+  strict-paths:
+    description: Fail upload if a normalized source path is absent from the checkout.
+    default: 'false'
+  config:
+    description: Repository-relative Mustard configuration file path.
+  config-source:
+    description: Config ref for same-repository pull requests. Forks always use the merge base.
+  workflow:
+    description: Repository-relative workflow file used to locate baseline artifacts.
+  fail-ci:
+    description: Fail the aggregation step when a non-informational Mustard check fails.
+    default: 'false'
+  retention-days:
+    description: Artifact retention in days. Defaults to the repository setting.
+  run-id:
+    description: Workflow run ID in comment mode. It must match the triggering event.
+  name:
+    description: Scope this installation's artifacts, checks and sticky comment.
+outputs:
+  project-coverage:
+    description: Project coverage percentage.
+  project-delta:
+    description: Project change from the baseline in percentage points.
+  patch-coverage:
+    description: Patch coverage percentage.
+  patch-hits:
+    description: Fully covered changed lines.
+  patch-total:
+    description: Coverable changed lines.
+  baseline-sha:
+    description: Commit SHA of the verified baseline.
+  project-status:
+    description: Conclusion of the default project check.
+  patch-status:
+    description: Conclusion of the default patch check.
+  report-artifact-id:
+    description: GitHub Actions artifact ID for the normalized report.
+runs:
+  using: node24
+  main: dist/index.cjs

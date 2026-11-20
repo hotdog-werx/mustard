@@ -1,0 +1,19 @@
+providers:
+  workspace:
+    cli: devkit-workspace-link
+    context_overrides:
+      devkit_ref: &devkit-ref 0de802099634a9675c03f564ad0b84711c709693
+
+  releez:
+    cli: devkit-releez-link
+    overrides:
+      file_mappings:
+        # Mustard attaches and attests its action ZIP before publishing the release.
+        .github/workflows/finalize-release.yaml: false
+    context_overrides:
+      devkit_ref: *devkit-ref
+
+providers_order: [workspace, releez]
+
+post_process:
+  - mise run workspace:dprint:format

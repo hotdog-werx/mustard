@@ -1,0 +1,118 @@
+name: Test Mustard action
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  action:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: mise.toml
+          cache: npm
+      - run: npm ci
+      - name: Install coverage.py for integration tests
+        run: |
+          # Windows venvs use Scripts/python.exe, and python3 there can be the
+          # Microsoft Store stub.
+          if [[ "$RUNNER_OS" == Windows ]]; then python=python; bin=Scripts; else python=python3; bin=bin; fi
+          "$python" -m venv "$RUNNER_TEMP/mustard-python"
+          "$RUNNER_TEMP/mustard-python/$bin/python" -m pip install -r tests/fixtures/requirements.txt
+          echo "$RUNNER_TEMP/mustard-python/$bin" >> "$GITHUB_PATH"
+      - run: npm run test:action
+
+      # --import takes a URL; a bare absolute path fails on Windows (D:\…).
+      - name: Resolve the GitHub API mock
+        run: |
+          node -e "console.log('MUSTARD_MOCK=' + require('node:url').pathToFileURL('tests/action/mock-github.ts').href)" >> "$GITHUB_ENV"
+
+      - name: Prepare coverage input
+        shell: bash
+        run: |
+          export MUSTARD_TEST_STATE="$RUNNER_TEMP/mustard-action-test"
+          export MUSTARD_TEST_WORKSPACE="$MUSTARD_TEST_STATE/workspace"
+          printf 'MUSTARD_TEST_STATE=%s\nMUSTARD_TEST_WORKSPACE=%s\n' \
+            "$MUSTARD_TEST_STATE" "$MUSTARD_TEST_WORKSPACE" >> "$GITHUB_ENV"
+          node --input-type=module <<'JS'
+          import { mkdirSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { changedCoverage } from './tests/action/scenario.ts';
+          const workspace = process.env.MUSTARD_TEST_WORKSPACE;
+          mkdirSync(join(workspace, 'src'), { recursive: true });
+          writeFileSync(join(workspace, 'src/example.ts'), 'one\ntwo\nthree\n');
+          writeFileSync(join(workspace, 'lcov.info'), changedCoverage);
+          JS
+
+      - name: Upload coverage using the action manifest
+        uses: ./
+        env:
+          NODE_OPTIONS: --import=${{ env.MUSTARD_MOCK }}
+        with:
+          github-token: mustard-test-github-token
+          mode: upload
+          files: lcov.info
+          shard: manifest-test
+          strict-paths: 'true'
+
+      - name: Report coverage using the default mode
+        id: report
+        uses: ./
+        env:
+          NODE_OPTIONS: --import=${{ env.MUSTARD_MOCK }}
+
+        with:
+          github-token: mustard-test-github-token
+
+      - name: Recompute the result in the fork comment workflow
+        id: comment
+        uses: ./
+        env:
+          NODE_OPTIONS: --import=${{ env.MUSTARD_MOCK }}
+          MUSTARD_TEST_EVENT: workflow_run
+        with:
+          github-token: mustard-test-github-token
+          mode: comment
+
+      - name: Assert the action outputs as seen by the runner
+        shell: bash
+        env:
+          PROJECT: ${{ steps.report.outputs.project-coverage }}
+          PATCH: ${{ steps.report.outputs.patch-coverage }}
+          PATCH_STATUS: ${{ steps.report.outputs.patch-status }}
+          COMMENT_PATCH: ${{ steps.comment.outputs.patch-coverage }}
+          COMMENT_STATUS: ${{ steps.comment.outputs.patch-status }}
+        run: |
+          [[ "$PROJECT" == "66.66%" && "$PATCH" == "50.00%" ]]
+          [[ "$PATCH_STATUS" == "failure" && "$COMMENT_STATUS" == "failure" ]]
+          [[ "$COMMENT_PATCH" == "50.00%" ]]
+
+      - name: Reject an invalid action mode
+        id: required
+        continue-on-error: true
+        uses: ./
+        env:
+          NODE_OPTIONS: --import=${{ env.MUSTARD_MOCK }}
+        with:
+          github-token: mustard-test-github-token
+          mode: invalid
+
+      - name: Assert the runner observed a step failure
+        shell: bash
+        env:
+          RESULT: ${{ steps.required.outcome }}
+        run: '[[ "$RESULT" == "failure" ]]'

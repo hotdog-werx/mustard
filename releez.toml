@@ -1,0 +1,17 @@
+[tool.releez]
+base-branch = "master"
+create-pr = true
+alias-versions = "major"
+
+[tool.releez.hooks]
+post-changelog = [
+  [
+    "npm",
+    "version",
+    "--no-git-tag-version",
+    "--allow-same-version",
+    "{version}",
+  ],
+  ["npm", "run", "build"],
+  ["mise", "run", "workspace:dprint:format", "{changelog}"],
+]

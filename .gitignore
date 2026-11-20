@@ -1,0 +1,9 @@
+/tmp/
+/node_modules/
+/.repolish/
+/.editorconfig
+/dprint.json
+/.uv-toolbox/
+/.venv/
+/lcov.info
+/site/

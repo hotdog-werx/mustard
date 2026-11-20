@@ -1,0 +1,411 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mustard configuration",
+  "type": "object",
+  "properties": {
+    "coverage": {
+      "type": "object",
+      "properties": {
+        "precision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 6,
+          "default": 2
+        },
+        "round": {
+          "enum": [
+            "down",
+            "up",
+            "nearest"
+          ]
+        },
+        "range": {
+          "type": "string",
+          "examples": [
+            "70...100"
+          ]
+        },
+        "status": {
+          "type": "object",
+          "properties": {
+            "project": {
+              "$ref": "#/$defs/statuses"
+            },
+            "patch": {
+              "$ref": "#/$defs/statuses"
+            }
+          }
+        }
+      }
+    },
+    "ignore": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "fixes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "flags": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/name"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "carryforward": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "flag_management": {
+      "type": "object",
+      "properties": {
+        "default_rules": {
+          "type": "object",
+          "properties": {
+            "carryforward": {
+              "type": "boolean"
+            }
+          }
+        },
+        "individual_flags": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "$ref": "#/$defs/name"
+              },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "carryforward": {
+                "type": "boolean"
+              },
+              "status": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
+    "component_management": {
+      "type": "object",
+      "properties": {
+        "individual_components": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "component_id": {
+                "$ref": "#/$defs/name"
+              },
+              "name": {
+                "type": "string"
+              },
+              "paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "statuses": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "enum": [
+                        "project",
+                        "patch"
+                      ]
+                    },
+                    "target": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/$defs/percentage"
+                        },
+                        {
+                          "enum": [
+                            "auto"
+                          ]
+                        }
+                      ]
+                    },
+                    "threshold": {
+                      "$ref": "#/$defs/percentage"
+                    },
+                    "informational": {
+                      "type": "boolean"
+                    },
+                    "if_no_baseline": {
+                      "enum": [
+                        "neutral",
+                        "success",
+                        "failure"
+                      ]
+                    },
+                    "paths": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "flags": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/$defs/name"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "required": [
+              "component_id"
+            ]
+          }
+        }
+      }
+    },
+    "comment": {
+      "type": "object",
+      "properties": {
+        "behavior": {
+          "enum": [
+            "default",
+            "once",
+            "new",
+            "off"
+          ]
+        },
+        "require_changes": {
+          "type": "boolean"
+        },
+        "only_on_failure": {
+          "type": "boolean"
+        },
+        "show_carryforward_flags": {
+          "type": "boolean"
+        },
+        "indirect_changes": {
+          "type": "boolean"
+        },
+        "max_files": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 500,
+          "default": 50
+        },
+        "layout": {
+          "type": "string"
+        }
+      }
+    },
+    "annotations": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "max": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000,
+          "default": 200
+        }
+      }
+    },
+    "baseline": {
+      "type": "object",
+      "properties": {
+        "max_walk": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 20
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "attestations": {
+          "$ref": "#/$defs/attestations"
+        },
+        "trusted_branches": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allow_self_hosted": {
+          "type": "boolean"
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "enum": [
+            "base",
+            "head"
+          ]
+        }
+      }
+    },
+    "badge": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/name"
+          }
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/name"
+          }
+        }
+      }
+    },
+    "html": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "require_uploads": {
+      "type": "boolean"
+    },
+    "indirect_changes": {
+      "enum": [
+        "informational",
+        "fail"
+      ]
+    },
+    "attestations": {
+      "$ref": "#/$defs/attestations"
+    }
+  },
+  "$defs": {
+    "name": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    },
+    "percentage": {
+      "anyOf": [
+        {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        {
+          "type": "string",
+          "pattern": "^(?:\\d+(?:\\.\\d+)?|\\.\\d+)%?$"
+        }
+      ]
+    },
+    "attestations": {
+      "enum": [
+        "required",
+        "auto",
+        "off"
+      ]
+    },
+    "status": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/percentage"
+            },
+            {
+              "enum": [
+                "auto"
+              ]
+            }
+          ]
+        },
+        "threshold": {
+          "$ref": "#/$defs/percentage"
+        },
+        "informational": {
+          "type": "boolean"
+        },
+        "if_no_baseline": {
+          "enum": [
+            "neutral",
+            "success",
+            "failure"
+          ]
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/name"
+          }
+        }
+      }
+    },
+    "statuses": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/name"
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "$ref": "#/$defs/status"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

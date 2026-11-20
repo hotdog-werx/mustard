@@ -1,0 +1,16 @@
+{
+  "formatter": {
+    "indentStyle": "space",
+    "lineWidth": 110
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single"
+    }
+  },
+  "files": {
+    "includes": [
+      "**/*.ts"
+    ]
+  }
+}
