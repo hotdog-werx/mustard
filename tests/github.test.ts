@@ -22,6 +22,7 @@ import {
   annotationBatches,
   escapeHtml,
   escapeMarkdown,
+  failureMessage,
   markdown,
   stickyComment,
   writeChecks,
@@ -381,6 +382,47 @@ test('attaches checks to the PR head and batches annotations across API updates'
     ),
     [50, 1],
   );
+});
+
+test('the fail-ci message names each failed check and explains the policy source', () => {
+  const config = readConfig();
+  const uploads = new Map([
+    [
+      'default',
+      new Map([
+        [
+          'src/a.ts',
+          new Map([
+            [1, [1]],
+            [2, [0]],
+            [3, [0]],
+          ] as const),
+        ],
+      ]),
+    ],
+  ]);
+  const diff = new Map([['src/a.ts', { lines: new Set([1, 2, 3]) }]]);
+  const report = compute(uploads as never, diff, config, undefined, true, true);
+  const failed = report.checks.filter((check) => check.conclusion === 'failure');
+  const message = failureMessage(failed, report, 'mustard', {
+    fromBase: true,
+    hasConfig: false,
+    configChanged: true,
+  });
+  assert.match(message, /^1 Mustard coverage check\(s\) failed, and fail-ci is enabled:/);
+  assert.match(
+    message,
+    /- mustard\/patch: 33\.33% coverage, minimum 100\.00%\. 2 changed line\(s\) lack full coverage/,
+  );
+  assert.match(message, /merge base has no Mustard config, so the defaults apply/);
+  assert.match(message, /This PR changes the coverage config/);
+  const quiet = failureMessage(failed, report, 'mustard[api]', {
+    fromBase: true,
+    hasConfig: true,
+    configChanged: false,
+  });
+  assert.match(quiet, /- mustard\[api\]\/patch:/);
+  assert.doesNotMatch(quiet, /merge base|changes the coverage config/);
 });
 
 test('escapes PR comment data and updates only the Actions bot sticky comment', async () => {

@@ -341,7 +341,8 @@ test('fail-ci propagates a failed patch to the runner', (t) => {
   const report = fixture.run({ 'fail-ci': 'true' });
   assert.equal(report.status, 1, report.diagnostics);
   assert.equal(report.outputs['patch-status'], 'failure');
-  assert.match(report.stdout, /required Mustard coverage check failed/);
+  assert.match(report.stdout, /Mustard coverage check\(s\) failed, and fail-ci is enabled/);
+  assert.match(report.stdout, /mustard\/patch: .*coverage, minimum/);
 });
 
 test('a late completion event from an earlier fork run cannot write checks or comments', (t) => {

@@ -8,7 +8,13 @@ function posix(path: string): string {
 }
 
 function strip(path: string, prefix: string): string {
-  return prefix && path.startsWith(`${prefix}/`) ? path.slice(prefix.length + 1) : path;
+  if (!prefix) return path;
+  // Windows paths are case-insensitive, and tools disagree on drive-letter
+  // case (D:\a\repo vs d:\a\repo). Compare Windows-style prefixes without case.
+  const windows = /^[A-Za-z]:\//.test(prefix);
+  const head = path.slice(0, prefix.length + 1);
+  const matches = windows ? head.toLowerCase() === `${prefix}/`.toLowerCase() : head === `${prefix}/`;
+  return matches ? path.slice(prefix.length + 1) : path;
 }
 
 export function within(root: string, path: string): boolean {

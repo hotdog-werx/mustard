@@ -6,7 +6,8 @@ uncovered changed lines, and summarize the result on the pull request.
 
 ## Get started
 
-- [Install Mustard in your CI workflow](quick-start.md).
+- [Install Mustard in your CI workflow](quick-start.md) and
+  [roll it out in stages](quick-start.md#roll-out-in-stages).
 - [Choose project and patch coverage targets](configuration.md#checks).
 - [Set up fork PR reporting, test shards, or a coverage badge](github-actions/workflow-recipes.md).
 

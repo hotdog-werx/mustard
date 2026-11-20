@@ -153030,7 +153030,11 @@ function posix(path4) {
   return path4.replaceAll("\\", "/").replace(/^\.\//, "");
 }
 function strip(path4, prefix2) {
-  return prefix2 && path4.startsWith(`${prefix2}/`) ? path4.slice(prefix2.length + 1) : path4;
+  if (!prefix2) return path4;
+  const windows = /^[A-Za-z]:\//.test(prefix2);
+  const head = path4.slice(0, prefix2.length + 1);
+  const matches2 = windows ? head.toLowerCase() === `${prefix2}/`.toLowerCase() : head === `${prefix2}/`;
+  return matches2 ? path4.slice(prefix2.length + 1) : path4;
 }
 function within(root, path4) {
   const rel = (0, import_node_path4.relative)(root, path4);
@@ -153496,6 +153500,26 @@ async function publishSummary(display) {
   setOutput("project-status", report.checks.find((check2) => check2.name === "project")?.conclusion ?? "");
   setOutput("patch-status", report.checks.find((check2) => check2.name === "patch")?.conclusion ?? "");
   setOutput("report-artifact-id", display.reportId ?? "");
+}
+function failureMessage(failed, report, prefix2, context5) {
+  const uncovered = report.patch.total - report.patch.hit;
+  const lines = failed.map((check2) => {
+    const detail = check2.name === "patch" && uncovered ? ` ${uncovered} changed line(s) lack full coverage. See the check's annotations.` : "";
+    return `- ${prefix2}/${check2.name}: ${check2.message}${detail}`;
+  });
+  const hints = [];
+  if (context5.fromBase && !context5.hasConfig)
+    hints.push(
+      "The merge base has no Mustard config, so the defaults apply (patch target 100%). Policy changes take effect after they reach the base branch."
+    );
+  if (context5.configChanged)
+    hints.push("This PR changes the coverage config, but the checks use the merge-base config.");
+  return [
+    `${failed.length} Mustard coverage check(s) failed, and fail-ci is enabled:`,
+    ...lines,
+    ...hints,
+    "The workflow summary has the full report."
+  ].join("\n");
 }
 
 // src/upload.ts
@@ -154134,8 +154158,11 @@ async function main() {
     await publishBadge(api, event, config, report, namespace);
   }
   info(`Mustard finished in ${Math.round((Date.now() - started) / 1e3)}s`);
-  if (getBooleanInput("fail-ci") && report.checks.some((check2) => check2.conclusion === "failure")) {
-    setFailed("A required Mustard coverage check failed.");
+  const failed = report.checks.filter((check2) => check2.conclusion === "failure");
+  if (getBooleanInput("fail-ci") && failed.length) {
+    setFailed(
+      failureMessage(failed, report, namespace.check, { fromBase, hasConfig: !!text, configChanged })
+    );
   }
 }
 main().catch(

@@ -10,6 +10,14 @@ warnings in the current job. Expired artifacts are skipped. The patch check can
 still run.
 [Baseline eligibility and retention](concepts/storage.md#which-reports-can-become-baselines)
 
+## Patch fails on the PR that adds Mustard
+
+Mustard reads `.github/mustard.yml` from the PR's merge base. Until the config
+reaches the default branch, the PR is judged by the defaults, which require 100%
+patch coverage. A PR that adds both Mustard and new code can fail that target.
+Merge the adoption PR before requiring the checks or setting `fail-ci: true`.
+[Roll out in stages](quick-start.md#roll-out-in-stages)
+
 ## No coverage uploads found for this attempt
 
 Check the test job's logs and artifact list. Confirm that the coverage tool

@@ -8,7 +8,7 @@ import { schema, serialize, totals } from './coverage.ts';
 import { getDiff } from './diff.ts';
 import { publishBadge, uploadHtml } from './extras.ts';
 import { configAt, getEvent, isProtectedSource, loadConfig, sha } from './github.ts';
-import { publishSummary, stickyComment, writeChecks } from './publish.ts';
+import { failureMessage, publishSummary, stickyComment, writeChecks } from './publish.ts';
 import { compute } from './report.ts';
 import { retention, upload } from './upload.ts';
 import pkg from '../package.json' with { type: 'json' };
@@ -153,8 +153,11 @@ async function main() {
     await publishBadge(api, event, config, report, namespace);
   }
   info(`Mustard finished in ${Math.round((Date.now() - started) / 1000)}s`);
-  if (getBooleanInput('fail-ci') && report.checks.some((check) => check.conclusion === 'failure')) {
-    setFailed('A required Mustard coverage check failed.');
+  const failed = report.checks.filter((check) => check.conclusion === 'failure');
+  if (getBooleanInput('fail-ci') && failed.length) {
+    setFailed(
+      failureMessage(failed, report, namespace.check, { fromBase, hasConfig: !!text, configChanged }),
+    );
   }
 }
 

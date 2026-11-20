@@ -51,6 +51,12 @@ test('normalizes paths and passes Cobertura sources to the resolver', () => {
     normalizePath('C:\\agent\\work\\repo\\src\\a.ts', 'C:\\agent\\work\\repo', '', []),
     'src/a.ts',
   );
+  // Windows tools disagree on drive-letter case; POSIX paths stay case-sensitive.
+  assert.equal(
+    normalizePath('d:\\a\\releez\\releez\\src\\cli.py', 'D:\\a\\releez\\releez', '', []),
+    'src/cli.py',
+  );
+  assert.equal(normalizePath('/Workspace/src/a.py', '/workspace', '', []), '/Workspace/src/a.py');
   assert.equal(
     normalizePath('site-packages/pkg/a.py', '/workspace', '', [['site-packages/pkg/', 'src/pkg/']]),
     'src/pkg/a.py',

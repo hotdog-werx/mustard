@@ -332,3 +332,34 @@ export async function publishSummary(display: Display) {
   setOutput('patch-status', report.checks.find((check) => check.name === 'patch')?.conclusion ?? '');
   setOutput('report-artifact-id', display.reportId ?? '');
 }
+
+// fail-ci turns check results into a job failure, so say which checks failed,
+// by how much, and why the policy might not be the one the reader expects.
+export function failureMessage(
+  failed: Report['checks'],
+  report: Report,
+  prefix: string,
+  context: { fromBase: boolean; hasConfig: boolean; configChanged: boolean },
+): string {
+  const uncovered = report.patch.total - report.patch.hit;
+  const lines = failed.map((check) => {
+    const detail =
+      check.name === 'patch' && uncovered
+        ? ` ${uncovered} changed line(s) lack full coverage. See the check's annotations.`
+        : '';
+    return `- ${prefix}/${check.name}: ${check.message}${detail}`;
+  });
+  const hints = [];
+  if (context.fromBase && !context.hasConfig)
+    hints.push(
+      'The merge base has no Mustard config, so the defaults apply (patch target 100%). Policy changes take effect after they reach the base branch.',
+    );
+  if (context.configChanged)
+    hints.push('This PR changes the coverage config, but the checks use the merge-base config.');
+  return [
+    `${failed.length} Mustard coverage check(s) failed, and fail-ci is enabled:`,
+    ...lines,
+    ...hints,
+    'The workflow summary has the full report.',
+  ].join('\n');
+}
