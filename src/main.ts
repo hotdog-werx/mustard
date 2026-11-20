@@ -134,7 +134,10 @@ async function main() {
   if (event.base && (!event.fork || mode === 'comment')) {
     if (event.pull) {
       const { data: current } = await api.rest.pulls.get({ ...event.repo, pull_number: event.pull.number });
-      if (current.head.sha !== event.commit || current.base.sha !== event.base || current.state !== 'open') {
+      // GitHub rewrites base.sha asynchronously as the base branch moves, so
+      // comparing it would silently skip required checks for an unchanged head.
+      // Checks attach to the head commit, which is all that has to match.
+      if (current.head.sha !== event.commit || current.state !== 'open') {
         info('The pull request changed while Mustard was reporting.');
         return;
       }

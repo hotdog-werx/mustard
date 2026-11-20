@@ -106,6 +106,7 @@ github.get(/.*/).reply((request: Request) => {
   if (route === '/pulls/5') {
     const current = pull(fork);
     if (process.env.MUSTARD_TEST_PR_UPDATED === 'true') current.head.sha = merge;
+    if (process.env.MUSTARD_TEST_BASE_MOVED === 'true') current.base.sha = 'f'.repeat(40);
     return [200, current];
   }
   if (route.startsWith('/compare/')) {

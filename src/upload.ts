@@ -7,6 +7,7 @@ import { context } from '@actions/github';
 import { putArtifact, uploadName, uploadPayload } from './artifacts.ts';
 import type { Names } from './artifacts.ts';
 import { parseFix, readConfig } from './config.ts';
+import type { Fix } from './config.ts';
 import { assertBudget, integer, maxBytes, mergeFiles, safePath, slug } from './coverage.ts';
 import type { Files } from './coverage.ts';
 import { configAt, sha } from './github.ts';
@@ -91,18 +92,14 @@ async function generateCoverage(workspace: string): Promise<string> {
   }
 }
 
-export async function upload(api: GitHub, namespace: Names, workspace: string) {
-  const pull = context.payload.pull_request;
-  const commit = sha(pull?.head.sha ?? context.payload.merge_group?.head_sha ?? context.sha);
-  const testCheckout = sha(context.sha);
-  const { text } = await configAt(api, context.repo, testCheckout, getInput('config'));
-  const config = readConfig(text, warning);
-  const fixes = [...config.fixes, ...getInput('path-fixes').split(/\r?\n/).filter(Boolean).map(parseFix)];
-  const root = getInput('root');
+export function pathResolver(workspace: string, root: string, fixes: Fix[]) {
   const unmatched = new Set<string>();
   const normalized = new Map<string, string>();
   function normalize(raw: string, sources: string[] = []) {
-    const seen = normalized.get(raw);
+    // Relative Cobertura paths resolve against each report's own <sources>, so
+    // the same raw name can mean different files in different reports.
+    const key = JSON.stringify([raw, sources]);
+    const seen = normalized.get(key);
     if (seen) return seen;
     const path = normalizePath(raw, workspace, root, fixes);
     const candidates = [path];
@@ -114,9 +111,21 @@ export async function upload(api: GitHub, namespace: Names, workspace: string) {
     if (!found) unmatched.add(raw);
     const result = found ?? path;
     if (!safePath(result)) return '';
-    normalized.set(raw, result);
+    normalized.set(key, result);
     return result;
   }
+  return { normalize, unmatched };
+}
+
+export async function upload(api: GitHub, namespace: Names, workspace: string) {
+  const pull = context.payload.pull_request;
+  const commit = sha(pull?.head.sha ?? context.payload.merge_group?.head_sha ?? context.sha);
+  const testCheckout = sha(context.sha);
+  const { text } = await configAt(api, context.repo, testCheckout, getInput('config'));
+  const config = readConfig(text, warning);
+  const fixes = [...config.fixes, ...getInput('path-fixes').split(/\r?\n/).filter(Boolean).map(parseFix)];
+  const root = getInput('root');
+  const { normalize, unmatched } = pathResolver(workspace, root, fixes);
   const format = getInput('format') || 'auto';
   const flag = slug(getInput('flag') || 'default');
   const fileInput = getInput('files');

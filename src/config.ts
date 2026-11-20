@@ -67,8 +67,28 @@ function bounded(value: unknown, fallback: number, max: number) {
   return value === undefined ? fallback : integer(value, 0, max);
 }
 
+// Codecov path patterns are globs, regular expressions, or plain folder/file
+// paths. A plain path matches itself and everything below it.
+function pathMatcher(pattern: string): (path: string) => boolean {
+  if (/^\^|\$$|\.\*|\.\+|\\[.dws]/.test(pattern)) {
+    let regex: RegExp;
+    try {
+      regex = new RegExp(pattern.startsWith('^') ? pattern : `^(?:${pattern})`);
+    } catch {
+      throw new Error(`Invalid path regular expression ${JSON.stringify(pattern)} in Mustard config`);
+    }
+    return (path) => regex.test(path);
+  }
+  const trimmed = pattern.replace(/^\.\//, '').replace(/\/+$/, '');
+  if (!trimmed) return () => true;
+  if (picomatch.scan(trimmed).isGlob) return picomatch(trimmed, { dot: true });
+  return (path) => path === trimmed || path.startsWith(`${trimmed}/`);
+}
+
 export function matches(globs: string[], defaultMatch = true): (path: string) => boolean {
-  return globs.length ? picomatch(globs, { dot: true }) : () => defaultMatch;
+  if (!globs.length) return () => defaultMatch;
+  const matchers = globs.map(pathMatcher);
+  return (path) => matchers.some((match) => match(path));
 }
 
 export function parseFix(rule: string): Fix {

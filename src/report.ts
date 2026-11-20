@@ -56,6 +56,9 @@ function check(
   if (kind === 'patch' && !completeDiff) return make('failure', 'The complete PR diff was unavailable.');
   const actual = totals(measured);
   if (kind === 'patch' && !actual.total) return make('success', 'No coverable lines changed.');
+  // An empty selection is 100% by arithmetic, which would let a mistyped path
+  // filter pass forever. Treat it as a configuration error instead.
+  if (!actual.total) return make('failure', 'No coverable lines matched this check’s paths and flags.');
   if (rule.target === 'auto' && !baseline && kind === 'project') {
     return make(config.baseline.required ? 'failure' : rule.noBaseline, 'No baseline available.');
   }

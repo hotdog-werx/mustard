@@ -530,6 +530,23 @@ test('reports a failed patch check when the GitHub comparison is incomplete', (t
   assert.match(report.summary, /complete patch was unavailable/i);
 });
 
+test('a rerun of only the report job uses uploads from the earlier attempt', (t) => {
+  const fixture = scenario(t);
+  fixture.writeCoverage(fullCoverage);
+  ok(fixture.run({ mode: 'upload', files: 'lcov.info' }, { MUSTARD_TEST_ATTEMPT: '1' }));
+  const report = ok(fixture.run());
+  assert.equal(report.outputs['project-coverage'], '100.00%');
+  assert.doesNotMatch(report.summary, /No coverage uploads found/);
+});
+
+test('publishes checks when only the PR base moved during the run', (t) => {
+  const fixture = scenario(t);
+  fixture.writeCoverage(fullCoverage);
+  ok(fixture.run({ mode: 'upload' }));
+  ok(fixture.run({}, { MUSTARD_TEST_BASE_MOVED: 'true' }));
+  assert.ok(checks(fixture.state()).length > 0);
+});
+
 test('does not publish stale checks after the PR head changes', (t) => {
   const fixture = scenario(t);
   fixture.writeCoverage(fullCoverage);

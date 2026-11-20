@@ -57,8 +57,8 @@ The default project check compares coverage to the newest verified baseline and
 reports neutral until one exists. The patch check requires **100% of changed
 coverable lines**. Partially covered branches count against both percentages.
 Set `require_uploads: true` to fail coverage checks when nothing was uploaded.
-Use **Re-run all jobs** when retrying a matrix because Mustard uses uploads from
-the current run attempt.
+Each flag uses its uploads from the newest run attempt that produced it, so
+**Re-run failed jobs** works. Rerun all of a flag's shards together.
 
 Add `mustard/project` and `mustard/patch` as required checks in your branch
 ruleset after the checks have appeared on a PR. Select **GitHub Actions** as the

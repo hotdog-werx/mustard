@@ -203,13 +203,21 @@ export async function loadUploads(
   const all = await listArtifacts(api, event.repo, event.runId);
   const prefix = `${namespace.artifact}-upload-`;
   const pattern = new RegExp(
-    `^([A-Za-z0-9][A-Za-z0-9_-]{0,63})-${event.runId}-${event.attempt}-[0-9a-f-]{36}$`,
+    `^([A-Za-z0-9][A-Za-z0-9_-]{0,63})-${event.runId}-([1-9][0-9]{0,4})-[0-9a-f-]{36}$`,
   );
-  const valid = all.flatMap((entry) => {
+  const candidates = all.flatMap((entry) => {
     if (!entry.name.startsWith(prefix)) return [];
     const match = pattern.exec(entry.name.slice(prefix.length));
-    return match ? [{ entry, flag: match[1] }] : [];
+    const attempt = Number(match?.[2]);
+    return match && attempt <= event.attempt ? [{ entry, flag: match[1], attempt }] : [];
   });
+  // "Re-run failed jobs" keeps earlier attempts' artifacts but does not rerun
+  // jobs that succeeded. Use each flag's newest attempt so a retried report job
+  // still sees its shards, while a flag re-uploaded in this attempt replaces
+  // its older data instead of merging with it.
+  const newest = new Map<string, number>();
+  for (const { flag, attempt } of candidates) newest.set(flag, Math.max(attempt, newest.get(flag) ?? 0));
+  const valid = candidates.filter(({ flag, attempt }) => attempt === newest.get(flag));
   if (
     valid.length > maxArtifacts ||
     valid.reduce((size, item) => size + item.entry.size_in_bytes, 0) > maxRunBytes

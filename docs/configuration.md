@@ -80,6 +80,13 @@ component_management:
           target: 95%
 ```
 
+Paths in `ignore`, flags, checks, and components follow Codecov: a plain path
+such as `src/api` or `src/api/` matches that file or folder and everything below
+it. Patterns with `*`, `?`, `[`, or `{` are globs. Patterns that start with `^`,
+end with `$`, or contain `.*` are regular expressions anchored at the start of
+the path. A project, flag, or component check that selects no coverable lines
+fails rather than reporting 100%, so a mistyped path cannot pass silently.
+
 Components select paths from the combined project view. One component rule
 creates `mustard/component/core`. A component with both types uses
 `mustard/component/core/project` and `mustard/component/core/patch`.

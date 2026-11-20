@@ -18,16 +18,26 @@ import githubRoot from './trust/github.json' with { type: 'json' };
 const predicateType = 'https://slsa.dev/provenance/v1';
 const issuer = 'https://token.actions.githubusercontent.com';
 
-function unsupported(error: unknown): boolean {
+// GitHub reports plan limits with wording such as "Feature not available for
+// user-owned private repositories". Permission problems must never downgrade.
+export function unsupported(error: unknown): boolean {
   const code = statusCode(error);
   const message = error instanceof Error ? error.message : '';
   return (
     [403, 404, 422].includes(code ?? 0) &&
-    /(?:attestations?[^.\n]{0,150}(?:not supported|not available|not enabled|enterprise cloud|require[s]? a public)|(?:not supported|not available)[^.\n]{0,150}attestations?)/i.test(
+    /not supported|not available|not enabled|enterprise cloud|make (?:this|the) repository public|require[s]? a public/i.test(
       message,
     ) &&
-    !/token|permission/i.test(message)
+    !/token|permission|not accessible|scope/i.test(message)
   );
+}
+
+// Attestations are available on every public repository, so a public
+// repository never falls back. Private and internal repositories only have
+// them on some plans, and listing returns a bare 404 when they are unavailable.
+export async function publicRepository(api: GitHub, repo: Event['repo']): Promise<boolean> {
+  const { data } = await api.rest.repos.get(repo);
+  return data.visibility ? data.visibility === 'public' : !data.private;
 }
 
 export function trustedRun(run: Run, event: Event, commit: string, config: Config): boolean {
@@ -66,7 +76,11 @@ export async function signReport(
     });
     await api.request('POST /repos/{owner}/{repo}/attestations', { ...event.repo, bundle });
   } catch (error) {
-    if (config.baseline.attestations === 'auto' && unsupported(error)) {
+    if (
+      config.baseline.attestations === 'auto' &&
+      unsupported(error) &&
+      !(await publicRepository(api, event.repo))
+    ) {
       warning(
         'Artifact attestations are unavailable on this repository plan. Using workflow and artifact provenance.',
       );
@@ -90,7 +104,12 @@ function oid(number: number, text: string): NonNullable<VerificationPolicy['oids
   };
 }
 
-export function attestationPolicy(event: Event, run: Run, allowSelfHosted: boolean): VerificationPolicy {
+export function attestationPolicy(
+  event: Event,
+  run: Run,
+  allowSelfHosted: boolean,
+  attempt = run.run_attempt ?? 1,
+): VerificationPolicy {
   const source = `${process.env.GITHUB_SERVER_URL ?? 'https://github.com'}/${repository(event.repo)}`;
   const ref = `refs/heads/${run.head_branch}`;
   const workflow = `${source}/${run.path}@${ref}`;
@@ -104,7 +123,7 @@ export function attestationPolicy(event: Event, run: Run, allowSelfHosted: boole
       oid(14, ref),
       oid(18, workflow),
       oid(20, 'push'),
-      oid(21, `${source}/actions/runs/${run.id}/attempts/${run.run_attempt ?? 1}`),
+      oid(21, `${source}/actions/runs/${run.id}/attempts/${attempt}`),
       ...(!allowSelfHosted ? [oid(11, 'github-hosted')] : []),
     ],
   };
@@ -162,8 +181,23 @@ export class Provenance {
     this.config = config;
   }
 
-  async verify(name: string, digest: string, run: Run): Promise<void> {
+  private visibility?: Promise<boolean>;
+
+  private isPublic(): Promise<boolean> {
+    this.visibility ??= publicRepository(this.api, this.event.repo);
+    return this.visibility;
+  }
+
+  private fallBack(): void {
+    this.unavailable = true;
+    warning(
+      'Artifact attestations are unavailable on this repository plan. Using workflow and artifact provenance.',
+    );
+  }
+
+  async verify(name: string, digest: string, run: Run, attempt = run.run_attempt ?? 1): Promise<void> {
     if (this.config.baseline.attestations === 'off' || this.unavailable) return;
+    const auto = this.config.baseline.attestations === 'auto';
     let entries: unknown[];
     try {
       const { data } = await this.api.rest.repos.listAttestations({
@@ -173,21 +207,18 @@ export class Provenance {
       });
       entries = data.attestations ?? [];
     } catch (error) {
-      if (this.config.baseline.attestations === 'auto' && unsupported(error)) {
-        this.unavailable = true;
-        warning(
-          'Artifact attestations are unavailable on this repository plan. Using workflow and artifact provenance.',
-        );
-        return;
-      }
-      throw error;
+      if (statusCode(error) === 404) entries = [];
+      else if (auto && unsupported(error) && !(await this.isPublic())) return this.fallBack();
+      else throw error;
     }
+    // A private repository without attestation support cannot be told apart
+    // from an unsigned report, so auto mode only enforces signatures that exist.
+    // Use attestations: required to make their absence fatal.
+    if (!entries.length && auto && !(await this.isPublic())) return this.fallBack();
     if (!entries.length) throw new Error('No attestation found for the coverage artifact');
-    this.verifier ??= this.api.rest.repos
-      .get(this.event.repo)
-      .then(({ data }) => createVerifier(data.private));
+    this.verifier ??= this.isPublic().then((isPublic) => createVerifier(!isPublic));
     const verifier = await this.verifier;
-    const policy = attestationPolicy(this.event, run, this.config.baseline.selfHosted);
+    const policy = attestationPolicy(this.event, run, this.config.baseline.selfHosted, attempt);
     for (const entry of entries) {
       try {
         const bundle = bundleFromJSON(record(entry).bundle);
@@ -235,12 +266,15 @@ export async function findBaseline(
     for (const run of runs) {
       try {
         if (!run.head_branch || !(await protectedBranch(api, event, run.head_branch))) continue;
-        const attempt = run.run_attempt ?? 1;
-        const name = reportArtifactName(namespace, commit, attempt);
-        const artifacts = await listArtifacts(api, event.repo, run.id, name);
-        for (const artifact of artifacts.filter((entry) => entry.name === name)) {
+        // Newer attempts may not have rerun the report job, so fall back to the
+        // newest attempt that produced a report.
+        const artifacts = await listArtifacts(api, event.repo, run.id);
+        for (let attempt = run.run_attempt ?? 1; attempt >= 1; attempt--) {
+          const name = reportArtifactName(namespace, commit, attempt);
+          const artifact = artifacts.find((entry) => entry.name === name);
+          if (!artifact) continue;
           const { bytes, digest } = await downloadArtifact(event.repo, artifact, token);
-          await provenance.verify(name, digest, run);
+          await provenance.verify(name, digest, run, attempt);
           const flags = await readBaseline(bytes, commit, run.id, attempt, run.path);
           return { sha: commit, runId: run.id, distance, flags };
         }

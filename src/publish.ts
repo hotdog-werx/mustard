@@ -241,6 +241,20 @@ export function annotationBatches(annotations: Annotation[]): Annotation[][] {
   return result;
 }
 
+// The identity behind the token: GET /user works for user tokens, and the
+// GraphQL viewer covers GitHub App installation tokens.
+export async function authenticatedLogin(api: GitHub): Promise<string | undefined> {
+  try {
+    return (await api.rest.users.getAuthenticated()).data.login;
+  } catch {}
+  try {
+    const result = await api.graphql<{ viewer: { login: string } }>('query { viewer { login } }');
+    return result.viewer.login;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function stickyComment(api: GitHub, namespace: Names, display: Display) {
   const { event, report, config } = display;
   if (!event.pull || config.comment.behavior === 'off') return;
@@ -253,17 +267,27 @@ export async function stickyComment(api: GitHub, namespace: Names, display: Disp
   if ((config.comment.failure && !failure) || (config.comment.changes && !changed)) return;
   const params = { ...event.repo, issue_number: event.pull.number };
   const body = `${namespace.marker}\n${markdown(display, true)}`;
+  let viewer: Promise<string | undefined> | undefined;
+  const own = async (login: string | undefined) => {
+    if (!login) return false;
+    if (login === 'github-actions[bot]') return true;
+    // A PAT or GitHub App token posts as another identity. Look it up only when
+    // a marked comment from someone else exists, so GITHUB_TOKEN runs stay cheap.
+    viewer ??= authenticatedLogin(api);
+    return login === (await viewer);
+  };
   try {
     for await (const { data } of api.paginate.iterator(api.rest.issues.listComments, {
       ...params,
       per_page: 100,
     })) {
-      const existing = data.find(
-        (item) =>
-          item.user?.type === 'Bot' &&
-          item.user.login === 'github-actions[bot]' &&
-          item.body?.split(/\r?\n/, 1)[0] === namespace.marker,
-      );
+      let existing: (typeof data)[number] | undefined;
+      for (const item of data) {
+        if (item.body?.split(/\r?\n/, 1)[0] === namespace.marker && (await own(item.user?.login))) {
+          existing = item;
+          break;
+        }
+      }
       if (!existing) continue;
       if (config.comment.behavior === 'once' || existing.body === body) return;
       if (config.comment.behavior === 'default') {

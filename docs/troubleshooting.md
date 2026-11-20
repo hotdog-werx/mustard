@@ -14,9 +14,12 @@ still run.
 
 Check the test job's logs and artifact list. Confirm that the coverage tool
 wrote the file matched by the `files` input and that the upload and report steps
-use the same `name`. Use **Re-run all jobs** for matrix retries so each shard
-uploads to the new attempt. Set `require_uploads: true` if this should fail the
-coverage checks. [Upload inputs](github-actions/action.md#inputs)
+use the same `name`. **Re-run failed jobs** and **Re-run all jobs** both work.
+Each flag uses its uploads from the newest attempt that produced it, so shards
+that were not rerun still count. If you rerun only some shards of one flag,
+rerun all of that flag's jobs, because a newer attempt replaces the flag's older
+uploads. Set `require_uploads: true` if this should fail the coverage checks.
+[Upload inputs](github-actions/action.md#inputs)
 
 ## Patch coverage is lower than the test tool's line percentage
 

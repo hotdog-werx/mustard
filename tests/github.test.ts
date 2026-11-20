@@ -6,7 +6,14 @@ import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { mock, test } from 'node:test';
 import { downloadArtifact, names, readBaseline, readZip } from '../src/artifacts.ts';
-import { assertSubject, attestationPolicy, findBaseline, Provenance, trustedRun } from '../src/baseline.ts';
+import {
+  assertSubject,
+  attestationPolicy,
+  findBaseline,
+  Provenance,
+  trustedRun,
+  unsupported,
+} from '../src/baseline.ts';
 import { readConfig } from '../src/config.ts';
 import { compareFiles, gitDiff, newLines, parseGitDiff } from '../src/diff.ts';
 import { resolvePull } from '../src/github.ts';
@@ -174,9 +181,9 @@ test('baseline lookup ignores a fork and verifies candidates in trusted runs', a
       },
     },
     paginate: {
-      iterator: async function* (_method: unknown, params: { run_id: number; name: string }) {
+      iterator: async function* (_method: unknown, params: { run_id: number; name?: string }) {
         assert.equal(params.run_id, run.id);
-        assert.equal(params.name, artifactName);
+        assert.equal(params.name, undefined);
         yield {
           data: [
             {
@@ -206,6 +213,81 @@ test('baseline lookup ignores a fork and verifies candidates in trusted runs', a
   } finally {
     fetchMock.mock.restore();
   }
+});
+
+test('baseline lookup falls back to the newest attempt that produced a report', async () => {
+  const bytes = fixture('report.zip');
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  const rerun = { ...run, run_attempt: 3 };
+  const api = {
+    rest: {
+      actions: {
+        listWorkflowRunsForRepo: async () => ({ data: { workflow_runs: [rerun] } }),
+        listWorkflowRunArtifacts: () => {},
+      },
+      repos: { getBranch: async () => ({ data: { protected: true } }) },
+    },
+    paginate: {
+      iterator: async function* () {
+        yield {
+          data: [
+            {
+              id: 10,
+              name: 'mustard-upload-default-7-1-x',
+              expired: false,
+              size_in_bytes: 1,
+              digest: 'sha256:0',
+            },
+            {
+              id: 11,
+              name: `mustard-report-${base}`,
+              expired: false,
+              size_in_bytes: bytes.length,
+              digest: `sha256:${digest}`,
+            },
+          ],
+        };
+      },
+    },
+  } as unknown as GitHub;
+  const fetchMock = mock.method(globalThis, 'fetch', async () => new Response(new Uint8Array(bytes)));
+  try {
+    const config = readConfig('baseline: {attestations: off, max_walk: 0}');
+    const result = await findBaseline(api, event, base, 'example', config, names(''));
+    assert.equal(result?.runId, 7);
+    assert.equal(fetchMock.mock.callCount(), 1);
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
+test('the sticky comment recognizes comments posted with a personal or app token', async () => {
+  const namespace = names('');
+  const update = mock.fn(async (_params: Record<string, unknown>) => ({}));
+  const create = mock.fn(async (_params: Record<string, unknown>) => ({}));
+  const comments = [
+    { id: 1, user: { type: 'User', login: 'attacker' }, body: `${namespace.marker}\nFake` },
+    { id: 2, user: { type: 'Bot', login: 'coverage-app[bot]' }, body: `${namespace.marker}\nOld` },
+  ];
+  const api = {
+    rest: {
+      issues: { listComments: () => {}, updateComment: update, createComment: create },
+      users: {
+        getAuthenticated: async () => Promise.reject(Object.assign(new Error('no'), { status: 403 })),
+      },
+    },
+    graphql: async () => ({ viewer: { login: 'coverage-app[bot]' } }),
+    paginate: {
+      iterator: async function* () {
+        yield { data: comments };
+      },
+    },
+  } as unknown as GitHub;
+  const config = readConfig();
+  const report = compute(new Map(), new Map(), config);
+  await stickyComment(api, namespace, { report, config, event, configChanged: false, hasUploads: false });
+  assert.equal(create.mock.callCount(), 0);
+  assert.equal(update.mock.calls[0].arguments[0].comment_id, 2);
 });
 
 test('resolves a fork PR from repository, branch and the exact workflow head', async () => {
@@ -378,28 +460,41 @@ test('walks first parents to find the newest available verified baseline', async
   }
 });
 
-test('auto attestation policy falls back for an unsupported plan and rejects missing permissions', async () => {
+test('auto attestation policy falls back only where GitHub cannot offer attestations', async () => {
+  // Verbatim from POST /repos/{owner}/{repo}/attestations on a user-owned private repository.
   const plan = Object.assign(
     new Error(
-      'Artifact attestations are unavailable on this repository plan. Attestations are not supported.',
+      'Feature not available for user-owned private repositories. To enable this feature, please make this repository public.',
     ),
-    { status: 403 },
+    { status: 422 },
   );
+  const notFound = Object.assign(new Error('Not Found'), { status: 404 });
   const permission = Object.assign(new Error('Resource not accessible by integration'), { status: 403 });
-  function withError(error: Error) {
+  assert.equal(unsupported(plan), true);
+  assert.equal(unsupported(permission), false);
+  function withError(error: Error, visibility = 'private') {
     const request = mock.fn(async () => {
       throw error;
     });
-    const api = { rest: { repos: { listAttestations: request } } } as unknown as GitHub;
+    const api = {
+      rest: { repos: { listAttestations: request, get: async () => ({ data: { visibility } }) } },
+    } as unknown as GitHub;
     return { api, request };
   }
-  const unavailable = withError(plan);
-  const optional = new Provenance(unavailable.api, event, readConfig());
-  await optional.verify('report', 'digest', run);
-  await optional.verify('another-report', 'digest', run);
-  assert.equal(unavailable.request.mock.callCount(), 1);
-  const strict = new Provenance(unavailable.api, event, readConfig('baseline: {attestations: required}'));
-  await assert.rejects(strict.verify('report', 'digest', run), /not supported/);
+  for (const error of [plan, notFound]) {
+    const unavailable = withError(error);
+    const optional = new Provenance(unavailable.api, event, readConfig());
+    await optional.verify('report', 'digest', run);
+    await optional.verify('another-report', 'digest', run);
+    assert.equal(unavailable.request.mock.callCount(), 1);
+    const strict = new Provenance(unavailable.api, event, readConfig('baseline: {attestations: required}'));
+    await assert.rejects(strict.verify('report', 'digest', run), /not available|No attestation/);
+  }
+  // Every public repository supports attestations, so a missing one is never excused.
+  const publicRepo = new Provenance(withError(notFound, 'public').api, event, readConfig());
+  await assert.rejects(publicRepo.verify('report', 'digest', run), /No attestation found/);
+  const publicPlan = new Provenance(withError(plan, 'public').api, event, readConfig());
+  await assert.rejects(publicPlan.verify('report', 'digest', run), /not available/);
   const forbidden = new Provenance(withError(permission).api, event, readConfig());
   await assert.rejects(forbidden.verify('report', 'digest', run), /not accessible/);
 });

@@ -58,9 +58,11 @@ checks or badge files.
     flag: frontend
 ```
 
-Keep a single report job with `needs` covering all test jobs. For a retry, use
-**Re-run all jobs** so the current attempt includes coverage from every shard.
-For path-filtered suites, see
+Keep a single report job with `needs` covering all test jobs. **Re-run failed
+jobs** and **Re-run all jobs** both work. Each flag uses its uploads from the
+newest attempt that produced it, so shards that were not rerun still count. If
+you rerun only some shards of one flag, rerun all of that flag's jobs, because a
+newer attempt replaces the flag's older uploads. For path-filtered suites, see
 [flag settings and carryforward](../configuration.md#flags-and-components).
 
 ## Publish a badge

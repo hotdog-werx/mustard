@@ -150409,13 +150409,17 @@ async function loadUploads(api, event, token, namespace) {
   const all = await listArtifacts(api, event.repo, event.runId);
   const prefix2 = `${namespace.artifact}-upload-`;
   const pattern = new RegExp(
-    `^([A-Za-z0-9][A-Za-z0-9_-]{0,63})-${event.runId}-${event.attempt}-[0-9a-f-]{36}$`
+    `^([A-Za-z0-9][A-Za-z0-9_-]{0,63})-${event.runId}-([1-9][0-9]{0,4})-[0-9a-f-]{36}$`
   );
-  const valid = all.flatMap((entry) => {
+  const candidates = all.flatMap((entry) => {
     if (!entry.name.startsWith(prefix2)) return [];
     const match = pattern.exec(entry.name.slice(prefix2.length));
-    return match ? [{ entry, flag: match[1] }] : [];
+    const attempt = Number(match?.[2]);
+    return match && attempt <= event.attempt ? [{ entry, flag: match[1], attempt }] : [];
   });
+  const newest = /* @__PURE__ */ new Map();
+  for (const { flag, attempt } of candidates) newest.set(flag, Math.max(attempt, newest.get(flag) ?? 0));
+  const valid = candidates.filter(({ flag, attempt }) => attempt === newest.get(flag));
   if (valid.length > maxArtifacts || valid.reduce((size, item) => size + item.entry.size_in_bytes, 0) > maxRunBytes) {
     throw new Error("Coverage uploads exceed the per-run size or artifact count limit");
   }
@@ -152111,8 +152115,25 @@ function percent(value, fallback) {
 function bounded(value, fallback, max) {
   return value === void 0 ? fallback : integer(value, 0, max);
 }
+function pathMatcher(pattern) {
+  if (/^\^|\$$|\.\*|\.\+|\\[.dws]/.test(pattern)) {
+    let regex;
+    try {
+      regex = new RegExp(pattern.startsWith("^") ? pattern : `^(?:${pattern})`);
+    } catch {
+      throw new Error(`Invalid path regular expression ${JSON.stringify(pattern)} in Mustard config`);
+    }
+    return (path4) => regex.test(path4);
+  }
+  const trimmed = pattern.replace(/^\.\//, "").replace(/\/+$/, "");
+  if (!trimmed) return () => true;
+  if (import_picomatch.default.scan(trimmed).isGlob) return (0, import_picomatch.default)(trimmed, { dot: true });
+  return (path4) => path4 === trimmed || path4.startsWith(`${trimmed}/`);
+}
 function matches(globs, defaultMatch = true) {
-  return globs.length ? (0, import_picomatch.default)(globs, { dot: true }) : () => defaultMatch;
+  if (!globs.length) return () => defaultMatch;
+  const matchers = globs.map(pathMatcher);
+  return (path4) => matchers.some((match) => match(path4));
 }
 function parseFix(rule) {
   const index = rule.includes("::") ? rule.indexOf("::") : rule.indexOf(":", /^[A-Za-z]:[/\\]/.test(rule) ? 2 : 0);
@@ -152636,9 +152657,13 @@ var issuer = "https://token.actions.githubusercontent.com";
 function unsupported(error2) {
   const code = statusCode(error2);
   const message2 = error2 instanceof Error ? error2.message : "";
-  return [403, 404, 422].includes(code ?? 0) && /(?:attestations?[^.\n]{0,150}(?:not supported|not available|not enabled|enterprise cloud|require[s]? a public)|(?:not supported|not available)[^.\n]{0,150}attestations?)/i.test(
+  return [403, 404, 422].includes(code ?? 0) && /not supported|not available|not enabled|enterprise cloud|make (?:this|the) repository public|require[s]? a public/i.test(
     message2
-  ) && !/token|permission/i.test(message2);
+  ) && !/token|permission|not accessible|scope/i.test(message2);
+}
+async function publicRepository(api, repo) {
+  const { data } = await api.rest.repos.get(repo);
+  return data.visibility ? data.visibility === "public" : !data.private;
 }
 function trustedRun(run, event, commit, config) {
   return run.head_sha === commit && run.event === "push" && run.status === "completed" && run.head_repository?.full_name.toLowerCase() === repository(event.repo).toLowerCase() && run.path === event.workflow && !!run.head_branch && [event.defaultBranch, ...config.baseline.branches].includes(run.head_branch);
@@ -152659,7 +152684,7 @@ async function signReport(api, event, name, digest, token, config) {
     });
     await api.request("POST /repos/{owner}/{repo}/attestations", { ...event.repo, bundle });
   } catch (error2) {
-    if (config.baseline.attestations === "auto" && unsupported(error2)) {
+    if (config.baseline.attestations === "auto" && unsupported(error2) && !await publicRepository(api, event.repo)) {
       warning(
         "Artifact attestations are unavailable on this repository plan. Using workflow and artifact provenance."
       );
@@ -152680,7 +152705,7 @@ function oid(number, text) {
     value: Buffer.concat([Buffer.from(tag2), payload])
   };
 }
-function attestationPolicy(event, run, allowSelfHosted) {
+function attestationPolicy(event, run, allowSelfHosted, attempt = run.run_attempt ?? 1) {
   const source = `${process.env.GITHUB_SERVER_URL ?? "https://github.com"}/${repository(event.repo)}`;
   const ref = `refs/heads/${run.head_branch}`;
   const workflow = `${source}/${run.path}@${ref}`;
@@ -152694,7 +152719,7 @@ function attestationPolicy(event, run, allowSelfHosted) {
       oid(14, ref),
       oid(18, workflow),
       oid(20, "push"),
-      oid(21, `${source}/actions/runs/${run.id}/attempts/${run.run_attempt ?? 1}`),
+      oid(21, `${source}/actions/runs/${run.id}/attempts/${attempt}`),
       ...!allowSelfHosted ? [oid(11, "github-hosted")] : []
     ]
   };
@@ -152740,8 +152765,20 @@ var Provenance = class {
     this.event = event;
     this.config = config;
   }
-  async verify(name, digest, run) {
+  visibility;
+  isPublic() {
+    this.visibility ??= publicRepository(this.api, this.event.repo);
+    return this.visibility;
+  }
+  fallBack() {
+    this.unavailable = true;
+    warning(
+      "Artifact attestations are unavailable on this repository plan. Using workflow and artifact provenance."
+    );
+  }
+  async verify(name, digest, run, attempt = run.run_attempt ?? 1) {
     if (this.config.baseline.attestations === "off" || this.unavailable) return;
+    const auto = this.config.baseline.attestations === "auto";
     let entries;
     try {
       const { data } = await this.api.rest.repos.listAttestations({
@@ -152751,19 +152788,15 @@ var Provenance = class {
       });
       entries = data.attestations ?? [];
     } catch (error2) {
-      if (this.config.baseline.attestations === "auto" && unsupported(error2)) {
-        this.unavailable = true;
-        warning(
-          "Artifact attestations are unavailable on this repository plan. Using workflow and artifact provenance."
-        );
-        return;
-      }
-      throw error2;
+      if (statusCode(error2) === 404) entries = [];
+      else if (auto && unsupported(error2) && !await this.isPublic()) return this.fallBack();
+      else throw error2;
     }
+    if (!entries.length && auto && !await this.isPublic()) return this.fallBack();
     if (!entries.length) throw new Error("No attestation found for the coverage artifact");
-    this.verifier ??= this.api.rest.repos.get(this.event.repo).then(({ data }) => createVerifier(data.private));
+    this.verifier ??= this.isPublic().then((isPublic) => createVerifier(!isPublic));
     const verifier = await this.verifier;
-    const policy = attestationPolicy(this.event, run, this.config.baseline.selfHosted);
+    const policy = attestationPolicy(this.event, run, this.config.baseline.selfHosted, attempt);
     for (const entry of entries) {
       try {
         const bundle = (0, import_bundle2.bundleFromJSON)(record(entry).bundle);
@@ -152797,12 +152830,13 @@ async function findBaseline(api, event, start, token, config, namespace) {
     for (const run of runs) {
       try {
         if (!run.head_branch || !await protectedBranch(api, event, run.head_branch)) continue;
-        const attempt = run.run_attempt ?? 1;
-        const name = reportArtifactName(namespace, commit, attempt);
-        const artifacts = await listArtifacts(api, event.repo, run.id, name);
-        for (const artifact of artifacts.filter((entry) => entry.name === name)) {
+        const artifacts = await listArtifacts(api, event.repo, run.id);
+        for (let attempt = run.run_attempt ?? 1; attempt >= 1; attempt--) {
+          const name = reportArtifactName(namespace, commit, attempt);
+          const artifact = artifacts.find((entry) => entry.name === name);
+          if (!artifact) continue;
           const { bytes, digest } = await downloadArtifact(event.repo, artifact, token);
-          await provenance.verify(name, digest, run);
+          await provenance.verify(name, digest, run, attempt);
           const flags = await readBaseline(bytes, commit, run.id, attempt, run.path);
           return { sha: commit, runId: run.id, distance, flags };
         }
@@ -153012,6 +153046,7 @@ function check(rule, measured, baseline, config, kind, hasUploads, completeDiff)
   if (kind === "patch" && !completeDiff) return make("failure", "The complete PR diff was unavailable.");
   const actual = totals(measured);
   if (kind === "patch" && !actual.total) return make("success", "No coverable lines changed.");
+  if (!actual.total) return make("failure", "No coverable lines matched this check\u2019s paths and flags.");
   if (rule.target === "auto" && !baseline && kind === "project") {
     return make(config.baseline.required ? "failure" : rule.noBaseline, "No baseline available.");
   }
@@ -153339,6 +153374,18 @@ function annotationBatches(annotations) {
     result.push(annotations.slice(index, index + 50));
   return result;
 }
+async function authenticatedLogin(api) {
+  try {
+    return (await api.rest.users.getAuthenticated()).data.login;
+  } catch {
+  }
+  try {
+    const result = await api.graphql("query { viewer { login } }");
+    return result.viewer.login;
+  } catch {
+    return void 0;
+  }
+}
 async function stickyComment(api, namespace, display) {
   const { event, report, config } = display;
   if (!event.pull || config.comment.behavior === "off") return;
@@ -153348,14 +153395,25 @@ async function stickyComment(api, namespace, display) {
   const params = { ...event.repo, issue_number: event.pull.number };
   const body2 = `${namespace.marker}
 ${markdown(display, true)}`;
+  let viewer;
+  const own = async (login) => {
+    if (!login) return false;
+    if (login === "github-actions[bot]") return true;
+    viewer ??= authenticatedLogin(api);
+    return login === await viewer;
+  };
   try {
     for await (const { data } of api.paginate.iterator(api.rest.issues.listComments, {
       ...params,
       per_page: 100
     })) {
-      const existing = data.find(
-        (item) => item.user?.type === "Bot" && item.user.login === "github-actions[bot]" && item.body?.split(/\r?\n/, 1)[0] === namespace.marker
-      );
+      let existing;
+      for (const item of data) {
+        if (item.body?.split(/\r?\n/, 1)[0] === namespace.marker && await own(item.user?.login)) {
+          existing = item;
+          break;
+        }
+      }
       if (!existing) continue;
       if (config.comment.behavior === "once" || existing.body === body2) return;
       if (config.comment.behavior === "default") {
@@ -153655,18 +153713,12 @@ async function generateCoverage(workspace) {
     (0, import_node_fs4.rmSync)(temporary, { recursive: true, force: true });
   }
 }
-async function upload(api, namespace, workspace) {
-  const pull = context2.payload.pull_request;
-  const commit = sha(pull?.head.sha ?? context2.payload.merge_group?.head_sha ?? context2.sha);
-  const testCheckout = sha(context2.sha);
-  const { text } = await configAt(api, context2.repo, testCheckout, getInput("config"));
-  const config = readConfig(text, warning);
-  const fixes = [...config.fixes, ...getInput("path-fixes").split(/\r?\n/).filter(Boolean).map(parseFix)];
-  const root = getInput("root");
+function pathResolver(workspace, root, fixes) {
   const unmatched = /* @__PURE__ */ new Set();
   const normalized = /* @__PURE__ */ new Map();
   function normalize3(raw, sources = []) {
-    const seen = normalized.get(raw);
+    const key = JSON.stringify([raw, sources]);
+    const seen = normalized.get(key);
     if (seen) return seen;
     const path4 = normalizePath(raw, workspace, root, fixes);
     const candidates = [path4];
@@ -153678,9 +153730,20 @@ async function upload(api, namespace, workspace) {
     if (!found) unmatched.add(raw);
     const result = found ?? path4;
     if (!safePath(result)) return "";
-    normalized.set(raw, result);
+    normalized.set(key, result);
     return result;
   }
+  return { normalize: normalize3, unmatched };
+}
+async function upload(api, namespace, workspace) {
+  const pull = context2.payload.pull_request;
+  const commit = sha(pull?.head.sha ?? context2.payload.merge_group?.head_sha ?? context2.sha);
+  const testCheckout = sha(context2.sha);
+  const { text } = await configAt(api, context2.repo, testCheckout, getInput("config"));
+  const config = readConfig(text, warning);
+  const fixes = [...config.fixes, ...getInput("path-fixes").split(/\r?\n/).filter(Boolean).map(parseFix)];
+  const root = getInput("root");
+  const { normalize: normalize3, unmatched } = pathResolver(workspace, root, fixes);
   const format = getInput("format") || "auto";
   const flag = slug(getInput("flag") || "default");
   const fileInput = getInput("files");
@@ -154009,7 +154072,7 @@ async function main() {
   if (event.base && (!event.fork || mode === "comment")) {
     if (event.pull) {
       const { data: current } = await api.rest.pulls.get({ ...event.repo, pull_number: event.pull.number });
-      if (current.head.sha !== event.commit || current.base.sha !== event.base || current.state !== "open") {
+      if (current.head.sha !== event.commit || current.state !== "open") {
         info("The pull request changed while Mustard was reporting.");
         return;
       }

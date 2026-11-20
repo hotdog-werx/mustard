@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { parseCoverage } from '../src/parsers.ts';
 import { deserialize, mergeFiles, mergeLine, serialize, totals } from '../src/coverage.ts';
 import type { Files, FlagFiles } from '../src/coverage.ts';
-import { readConfig } from '../src/config.ts';
+import { matches, readConfig } from '../src/config.ts';
+import { pathResolver } from '../src/upload.ts';
 import { compute, formatPercent } from '../src/report.ts';
 import type { Diff } from '../src/report.ts';
 import { normalizePath } from '../src/paths.ts';
@@ -275,4 +278,71 @@ flag_management: {default_rules: {carryforward: true}}
   assert.deepEqual(report.carried, ['existing']);
   assert.equal(report.checks[0].conclusion, 'failure');
   assert.match(report.checks[0].message, /outside the diff/);
+});
+
+test("resolves the same relative Cobertura filename against each report's own sources", (t) => {
+  const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'mustard-sources-')));
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+  for (const name of ['a', 'b']) {
+    mkdirSync(join(workspace, `packages/${name}/src`), { recursive: true });
+    writeFileSync(join(workspace, `packages/${name}/src/util.py`), 'pass\n');
+  }
+  const { normalize } = pathResolver(workspace, '', []);
+  const report = (name: string) =>
+    `<coverage><sources><source>${workspace}/packages/${name}/src</source></sources><packages><package><classes><class filename="util.py"><lines><line number="1" hits="1"/></lines></class></classes></package></packages></coverage>`;
+  assert.deepEqual([...parseCoverage(report('a'), 'auto', normalize).keys()], ['packages/a/src/util.py']);
+  assert.deepEqual([...parseCoverage(report('b'), 'auto', normalize).keys()], ['packages/b/src/util.py']);
+});
+
+test('matches Codecov folder, glob, and regular-expression paths', () => {
+  const cases: Array<[string, string[], string[]]> = [
+    ['src/', ['src/a.ts', 'src/deep/b.ts'], ['srcs/a.ts', 'lib/src/a.ts']],
+    ['tests', ['tests/x.py', 'tests'], ['tests_util.py', 'src/tests/x.py']],
+    ['./src/api', ['src/api/v1.ts'], ['src/apis.ts']],
+    ['**/*.pb.go', ['a/b.pb.go'], ['a/b.go']],
+    ['^src/.*\\.ts$', ['src/a.ts'], ['src/a.tsx', 'lib/src/a.ts']],
+    ['[a-z]+/test_.*', ['pkg/test_one.rb'], ['pkg/one.rb', 'PKG/test_one.rb']],
+  ];
+  for (const [pattern, hits, misses] of cases) {
+    const match = matches([pattern]);
+    for (const path of hits) assert.equal(match(path), true, `${pattern} should match ${path}`);
+    for (const path of misses) assert.equal(match(path), false, `${pattern} should not match ${path}`);
+  }
+  assert.throws(() => matches(['^src/(']), /Invalid path regular expression/);
+});
+
+test('a project gate whose paths select no coverable lines fails instead of reporting 100%', () => {
+  const uploads: FlagFiles = new Map([['default', new Map([['src/a.ts', new Map([[1, [1]]])]])]]);
+  const config = readConfig(`
+ignore: [tests]
+coverage: {status: {project: {default: {target: 80}, api: {target: 80, paths: [src/apii/]}}}}
+component_management:
+  individual_components:
+    - component_id: typo
+      paths: [lib/]
+      statuses: [{type: project, target: 90}]
+`);
+  const result = compute(uploads, new Map(), config);
+  const conclusion = (name: string) => result.checks.find((check) => check.name === name)?.conclusion;
+  assert.equal(conclusion('project'), 'success');
+  assert.equal(conclusion('project/api'), 'failure');
+  assert.equal(conclusion('component/typo'), 'failure');
+  assert.match(
+    result.checks.find((check) => check.name === 'project/api')?.message ?? '',
+    /No coverable lines/,
+  );
+  const ignored = compute(
+    new Map([
+      [
+        'default',
+        new Map([
+          ['tests/t.py', new Map([[1, [0]]])],
+          ['src/a.ts', new Map([[1, [1]]])],
+        ]),
+      ],
+    ]),
+    new Map(),
+    config,
+  );
+  assert.deepEqual([...ignored.files.keys()], ['src/a.ts']);
 });
