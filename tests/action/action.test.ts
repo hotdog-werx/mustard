@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -78,12 +88,15 @@ function scenario(t: { after(fn: () => void): void }) {
   }
 
   const writeSource = (data: string) => writeFileSync(join(directory, 'src/example.ts'), data);
-  const state = (): State => JSON.parse(readFileSync(join(directory, 'state.json'), 'utf8'));
+  const state = (): State => {
+    const path = join(directory, 'state.json');
+    return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : { archives: [], calls: [] };
+  };
   const writeCoverage = (data: string) => writeFileSync(join(directory, 'lcov.info'), data);
   async function inspect(id: number, entries: string[]) {
     return readZip(readFileSync(join(directory, `${id}.zip`)), entries);
   }
-  return { run, state, writeCoverage, writeSource, inspect };
+  return { directory, run, state, writeCoverage, writeSource, inspect };
 }
 
 function ok(result: ReturnType<ReturnType<typeof scenario>['run']>) {
@@ -94,6 +107,122 @@ function ok(result: ReturnType<ReturnType<typeof scenario>['run']>) {
 function checks(state: State) {
   return state.calls.filter((call) => call.route === '/check-runs' || call.route.startsWith('/check-runs/'));
 }
+
+async function uploadedFiles(fixture: ReturnType<typeof scenario>) {
+  const [artifact] = fixture.state().archives;
+  assert.ok(artifact);
+  const archive = await fixture.inspect(artifact.id, ['coverage.json.gz']);
+  const coverage = archive.get('coverage.json.gz');
+  assert.ok(coverage);
+  return JSON.parse(gunzipSync(coverage).toString()).files;
+}
+
+const coveragePy = spawnSync('python3', ['-m', 'coverage', '--version'], { timeout: 5_000 }).status === 0;
+const pythonOptions = {
+  skip: coveragePy ? false : 'Install tests/fixtures/requirements.txt to test raw coverage.py uploads',
+};
+
+for (const mode of ['single', 'parallel', 'mixed']) {
+  test(`uploads raw coverage.py data from ${mode} runs`, pythonOptions, async (t) => {
+    const fixture = scenario(t);
+    writeFileSync(
+      join(fixture.directory, 'example.py'),
+      "import sys\nif sys.argv[1] == 'yes':\n    print('yes')\nelse:\n    print('no')\n",
+    );
+    const runs = mode === 'single' ? ['yes'] : ['yes', 'no'];
+    for (const [index, value] of runs.entries()) {
+      const parallel = mode === 'parallel' || index > 0;
+      const run = spawnSync(
+        'python3',
+        ['-m', 'coverage', 'run', '--branch', ...(parallel ? ['--parallel-mode'] : []), 'example.py', value],
+        { cwd: fixture.directory, encoding: 'utf8', timeout: 5_000 },
+      );
+      assert.equal(run.status, 0, run.stderr);
+    }
+    ok(fixture.run({ mode: 'upload', 'strict-paths': 'true' }));
+    assert.deepEqual(await uploadedFiles(fixture), {
+      'example.py': { lines: { 1: [1], 2: [1, runs.length, 2], 3: [1], 5: [runs.length - 1] } },
+    });
+    if (mode !== 'parallel') assert.ok(existsSync(join(fixture.directory, '.coverage')));
+  });
+}
+
+test('reports a raw coverage.py database that cannot be converted', pythonOptions, (t) => {
+  const fixture = scenario(t);
+  writeFileSync(join(fixture.directory, '.coverage'), '');
+  const result = fixture.run({ mode: 'upload' });
+  assert.equal(result.status, 1, result.diagnostics);
+  assert.match(result.stdout, /Could not convert coverage\.py data/);
+  assert.deepEqual(fixture.state().archives, []);
+});
+
+test('merges overlapping coverage from multiple LCOV files matched by a glob', async (t) => {
+  const fixture = scenario(t);
+  mkdirSync(join(fixture.directory, 'reports'));
+  writeFileSync(join(fixture.directory, 'reports', 'one.info'), changedCoverage);
+  writeFileSync(
+    join(fixture.directory, 'reports', 'two.info'),
+    'SF:src/example.ts\nDA:1,0\nDA:2,2\nend_of_record\n',
+  );
+  ok(
+    fixture.run({
+      mode: 'upload',
+      files: join(realpathSync(fixture.directory), 'reports', '*.info'),
+    }),
+  );
+  assert.deepEqual(await uploadedFiles(fixture), { 'src/example.ts': { lines: { 1: [1], 2: [2], 3: [1] } } });
+});
+
+test('rejects an explicitly configured report outside the checkout', (t) => {
+  const fixture = scenario(t);
+  const result = fixture.run({ mode: 'upload', files: '../lcov.info' });
+  assert.equal(result.status, 1, result.diagnostics);
+  assert.match(result.stdout, /Coverage file globs must stay inside GITHUB_WORKSPACE/);
+  assert.deepEqual(fixture.state().archives, []);
+});
+
+test('does not follow a coverage report symlink outside the checkout', {
+  skip: process.platform === 'win32' ? 'Creating symlinks can require elevated privileges on Windows' : false,
+}, (t) => {
+  const fixture = scenario(t);
+  const outside = mkdtempSync(join(tmpdir(), 'mustard-external-report-'));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
+  const report = join(outside, 'report.info');
+  writeFileSync(report, changedCoverage);
+  symlinkSync(report, join(fixture.directory, 'lcov.info'));
+  const result = fixture.run({ mode: 'upload', files: 'lcov.info' });
+  assert.equal(result.status, 1, result.diagnostics);
+  assert.match(result.stdout, /No files matched the files input/);
+  assert.deepEqual(fixture.state().archives, []);
+});
+
+test('explains how to supply a coverage report when default discovery finds nothing', (t) => {
+  const fixture = scenario(t);
+  const result = fixture.run({ mode: 'upload' });
+  assert.equal(result.status, 1, result.diagnostics);
+  assert.match(result.stdout, /No coverage files found.*Set the files input/);
+  assert.deepEqual(fixture.state().archives, []);
+});
+
+test('warns about unmatched sources in a default upload while retaining usable paths', async (t) => {
+  const fixture = scenario(t);
+  fixture.writeCoverage(`${changedCoverage}SF:src/generated.ts\nDA:1,1\nend_of_record\n`);
+  const result = ok(fixture.run({ mode: 'upload' }));
+  assert.match(result.stdout, /coverage path\(s\) did not match the checkout: "src\/generated.ts"/);
+  assert.deepEqual(await uploadedFiles(fixture), {
+    'src/example.ts': { lines: { 1: [1], 2: [0], 3: [1] } },
+    'src/generated.ts': { lines: { 1: [1] } },
+  });
+});
+
+test('rejects a report when it contains no coverable source lines', (t) => {
+  const fixture = scenario(t);
+  fixture.writeCoverage('SF:src/example.ts\nend_of_record\n');
+  const result = fixture.run({ mode: 'upload' });
+  assert.equal(result.status, 1, result.diagnostics);
+  assert.match(result.stdout, /Coverage reports contain no usable coverable lines/);
+  assert.deepEqual(fixture.state().archives, []);
+});
 
 test('upload uses the artifact service and writes a normalized archive for the PR head and run attempt', async (t) => {
   const fixture = scenario(t);
@@ -184,6 +313,25 @@ test('fail-ci propagates a failed patch to the runner', (t) => {
   assert.match(report.stdout, /required Mustard coverage check failed/);
 });
 
+test('a late completion event from an earlier fork run cannot write checks or comments', (t) => {
+  const fixture = scenario(t);
+  const report = ok(
+    fixture.run(
+      { mode: 'comment' },
+      {
+        MUSTARD_TEST_EVENT: 'workflow_run',
+        MUSTARD_TEST_FORK_RERUN: 'true',
+      },
+    ),
+  );
+  assert.match(report.stdout, /No matching open fork PR for this workflow run and attempt/);
+  assert.deepEqual(report.outputs, {});
+  assert.equal(
+    fixture.state().calls.some((call) => call.method !== 'GET'),
+    false,
+  );
+});
+
 test('merge queue attaches a patch check without posting a PR comment', (t) => {
   const fixture = scenario(t);
   fixture.writeCoverage(fullCoverage);
@@ -216,6 +364,20 @@ test('publishes the HTML report with escaped source and missed lines marked', as
   assert.ok(html);
   assert.ok(html.includes('class="miss">2  &lt;script&gt;uncovered&lt;/script&gt;'));
   assert.match(report.summary, new RegExp(`HTML report.*artifacts/${artifact.id}`));
+});
+
+test('fork HTML reports show line status without including checkout source', async (t) => {
+  const fixture = scenario(t);
+  fixture.writeCoverage(changedCoverage);
+  fixture.writeSource('source-only text\nlocal checkout line\nthree\n');
+  const fork = { MUSTARD_TEST_FORK: 'true', MUSTARD_TEST_CONFIG_SUFFIX: 'html: {enabled: true}\n' };
+  ok(fixture.run({ mode: 'upload' }, fork));
+  ok(fixture.run({}, fork));
+  const artifact = fixture.state().archives.find(({ name }) => name.startsWith('mustard-html-'));
+  assert.ok(artifact);
+  const html = (await fixture.inspect(artifact.id, ['index.html'])).get('index.html')?.toString() ?? '';
+  assert.match(html, /class="miss">2 {2}miss<\/span>/);
+  assert.doesNotMatch(html, /source-only text|local checkout line/);
 });
 
 test('publishes project, flag, and component badges on the default branch push', (t) => {
@@ -425,11 +587,50 @@ test('leaves an existing badge branch with unrelated history untouched', (t) => 
     {
       ...env,
       MUSTARD_TEST_CONFIG_SUFFIX: 'badge: {enabled: true}\n',
-      MUSTARD_TEST_EXISTING_BADGE_BRANCH: 'true',
+      MUSTARD_TEST_BADGE_TIP: 'unrelated',
     },
   );
   assert.equal(report.status, 1, report.diagnostics);
   assert.match(report.stdout, /Badge branch already has unrelated history/);
+  assert.equal(
+    fixture.state().calls.some((call) => call.method !== 'GET' && call.route.startsWith('/git/')),
+    false,
+  );
+});
+
+test('refreshes a Mustard-owned badge ref with the latest default-branch coverage', (t) => {
+  const fixture = scenario(t);
+  fixture.writeCoverage(changedCoverage);
+  const push = { MUSTARD_TEST_EVENT: 'push' };
+  ok(fixture.run({ mode: 'upload' }, push));
+  ok(
+    fixture.run(
+      {},
+      { ...push, MUSTARD_TEST_CONFIG_SUFFIX: 'badge: {enabled: true}\n', MUSTARD_TEST_BADGE_TIP: 'owned' },
+    ),
+  );
+  const { calls } = fixture.state();
+  const update = calls.find(
+    (call) => call.method === 'PATCH' && call.route === '/git/refs/heads/mustard-badges',
+  );
+  assert.deepEqual(update?.body, { sha: 'badge-commit', force: true });
+  assert.equal(
+    calls.some((call) => call.method === 'POST' && call.route === '/git/refs'),
+    false,
+  );
+});
+
+test('an older default-branch run cannot overwrite current coverage badges', (t) => {
+  const fixture = scenario(t);
+  fixture.writeCoverage(changedCoverage);
+  const push = { MUSTARD_TEST_EVENT: 'push' };
+  ok(fixture.run({ mode: 'upload' }, push));
+  ok(
+    fixture.run(
+      {},
+      { ...push, MUSTARD_TEST_CONFIG_SUFFIX: 'badge: {enabled: true}\n', MUSTARD_TEST_BADGE_TIP: 'stale' },
+    ),
+  );
   assert.equal(
     fixture.state().calls.some((call) => call.method !== 'GET' && call.route.startsWith('/git/')),
     false,

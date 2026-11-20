@@ -40,6 +40,7 @@ const attempt = process.env.MUSTARD_TEST_ATTEMPT ?? (eventKind === 'push' ? '1' 
 const eventFile = join(directory, 'event.json');
 const signPush = eventKind === 'push' && process.env.MUSTARD_TEST_SIGN === 'true';
 const repository = { default_branch: 'main', visibility: signPush ? 'private' : 'public' };
+const badgeTip = process.env.MUSTARD_TEST_BADGE_TIP;
 
 writeFileSync(
   eventFile,
@@ -93,7 +94,14 @@ github.get(/.*/).reply((request: Request) => {
   const url = new URL(request.url);
   const route = decodeURIComponent(url.pathname).replace(`/repos/${repo}`, '');
   record('GET', route, null);
-  if (route === '/actions/runs/7') return [200, forkRun];
+  if (route === '/actions/runs/7') {
+    return [
+      200,
+      process.env.MUSTARD_TEST_FORK_RERUN === 'true'
+        ? { ...forkRun, run_attempt: forkRun.run_attempt + 1 }
+        : forkRun,
+    ];
+  }
   if (route === '/pulls') return [200, [pull(fork)]];
   if (route === '/pulls/5') {
     const current = pull(fork);
@@ -165,14 +173,20 @@ github.get(/.*/).reply((request: Request) => {
     return [200, { total_count: artifacts.length, artifacts }];
   }
   if (route === '/issues/5/comments') return [200, []];
-  if (route === '/branches/main') return [200, { name: 'main', protected: true, commit: { sha: base } }];
+  if (route === '/branches/main')
+    return [200, { name: 'main', protected: true, commit: { sha: badgeTip === 'stale' ? head : base } }];
   if (route === '/branches/mustard-badges') {
-    if (process.env.MUSTARD_TEST_EXISTING_BADGE_BRANCH === 'true')
+    if (badgeTip === 'unrelated' || badgeTip === 'owned')
       return [200, { name: 'mustard-badges', protected: false, commit: { sha: 'existing-tip' } }];
     return [404, { message: 'Branch not found' }];
   }
   if (route === '/git/commits/existing-tip')
-    return [200, { parents: [{ sha: base }], message: 'Existing project branch' }];
+    return [
+      200,
+      badgeTip === 'owned'
+        ? { parents: [], message: 'Publish Mustard coverage badges' }
+        : { parents: [{ sha: base }], message: 'Existing project branch' },
+    ];
   if (route === `/commits/${base}`) return [200, { parents: [] }];
   if (route.startsWith('/attestations/sha256:')) return [200, { attestations: [] }];
   return noRoute('GET', route);
@@ -186,7 +200,9 @@ for (const method of ['POST', 'PATCH'] as const) {
     if (route === '/git/trees' && method === 'POST') return [201, { sha: 'badge-tree' }];
     if (route === '/git/commits' && method === 'POST') return [201, { sha: 'badge-commit' }];
     if (route === '/git/refs/heads/mustard-badges' && method === 'PATCH')
-      return [404, { message: 'Ref not found' }];
+      return badgeTip === 'owned'
+        ? [200, { ref: 'refs/heads/mustard-badges' }]
+        : [404, { message: 'Ref not found' }];
     if (route === '/git/refs' && method === 'POST') return [201, { ref: 'refs/heads/mustard-badges' }];
     if (route === '/attestations' && signPush) return [201, { id: 'test-attestation' }];
     if (route === '/check-runs' && process.env.MUSTARD_TEST_DENY === 'checks')

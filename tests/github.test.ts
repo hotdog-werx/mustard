@@ -225,6 +225,53 @@ test('resolves a fork PR from repository, branch and the exact workflow head', a
   assert.deepEqual(await resolvePull(api, repo, forkRun), pull);
 });
 
+test('trusts a configured release branch only while GitHub reports it as protected', async (t) => {
+  const branch = 'release/1.x';
+  const bytes = fixture('report.zip');
+  const artifactName = `mustard-report-${base}`;
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  let protectedBranch = false;
+  const downloads = t.mock.method(globalThis, 'fetch', async () => new Response(new Uint8Array(bytes)));
+  const api = {
+    rest: {
+      actions: {
+        listWorkflowRunsForRepo: async () => ({ data: { workflow_runs: [{ ...run, head_branch: branch }] } }),
+        listWorkflowRunArtifacts: () => {},
+      },
+      repos: {
+        getBranch: async ({ branch: requested }: { branch: string }) => {
+          assert.equal(requested, branch);
+          return { data: { protected: protectedBranch } };
+        },
+      },
+    },
+    paginate: {
+      iterator: async function* () {
+        yield {
+          data: [
+            {
+              id: 10,
+              name: artifactName,
+              expired: false,
+              size_in_bytes: bytes.length,
+              digest: `sha256:${digest}`,
+            },
+          ],
+        };
+      },
+    },
+  } as unknown as GitHub;
+  const config = readConfig(`baseline: {attestations: off, max_walk: 0, trusted_branches: [${branch}]}`);
+  assert.equal(await findBaseline(api, event, base, 'example', config, names('')), undefined);
+  assert.equal(downloads.mock.callCount(), 0);
+
+  protectedBranch = true;
+  const baseline = await findBaseline(api, event, base, 'example', config, names(''));
+  assert.equal(baseline?.sha, base);
+  assert.equal(baseline?.runId, run.id);
+  assert.equal(downloads.mock.callCount(), 1);
+});
+
 test('attaches checks to the PR head and batches annotations across API updates', async () => {
   const path = 'src/a.ts';
   const lines = Object.fromEntries(Array.from({ length: 101 }, (_, index) => [index + 1, [0]]));

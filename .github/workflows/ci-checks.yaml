@@ -32,6 +32,11 @@ jobs:
       - run: npm run build
       - run: git ls-files --error-unmatch dist/index.cjs dist/index.cjs.LEGAL.txt
       - run: git diff --exit-code -- dist/
+      - name: Install coverage.py for integration tests
+        run: |
+          python3 -m venv "$RUNNER_TEMP/mustard-python"
+          "$RUNNER_TEMP/mustard-python/bin/python3" -m pip install -r tests/fixtures/requirements.txt
+          echo "$RUNNER_TEMP/mustard-python/bin" >> "$GITHUB_PATH"
       - run: npm run coverage
       - uses: ./
         if: always() && !cancelled() && hashFiles('lcov.info') != ''

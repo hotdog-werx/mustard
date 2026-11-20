@@ -18,3 +18,15 @@ artifact service when it reports this repository's coverage.
 TypeScript sources so the native V8 LCOV report includes the action's child
 processes. The standalone action suite and the `uses: ./` workflow exercise the
 production bundle.
+
+The raw coverage.py upload scenarios run when `python3 -m coverage` is
+available. CI installs the version pinned in
+[`tests/fixtures/requirements.txt`](../fixtures/requirements.txt). To run those
+scenarios locally, install that file in a Python virtual environment and
+activate it before running the suite.
+
+The provenance integration tests use a checked-in DSSE envelope for
+`tests/fixtures/report.zip`. A test certificate authority issued the workflow
+and timestamping certificates. The RFC 3161 timestamp fixes the signing time, so
+verification does not depend on the current date. The tests supply the fixture
+trust root in place of TUF and run the real Sigstore verifier.

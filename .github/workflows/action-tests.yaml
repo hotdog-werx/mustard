@@ -19,6 +19,11 @@ jobs:
           node-version-file: mise.toml
           cache: npm
       - run: npm ci
+      - name: Install coverage.py for integration tests
+        run: |
+          python3 -m venv "$RUNNER_TEMP/mustard-python"
+          "$RUNNER_TEMP/mustard-python/bin/python3" -m pip install -r tests/fixtures/requirements.txt
+          echo "$RUNNER_TEMP/mustard-python/bin" >> "$GITHUB_PATH"
       - run: npm run test:action
 
       - name: Prepare coverage input
