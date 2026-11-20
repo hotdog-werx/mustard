@@ -56,6 +56,11 @@ async function readLimited(path: string, limit: number): Promise<string> {
   return Buffer.concat(chunks, size).toString('utf8');
 }
 
+// Windows virtual environments and setup-python provide python.exe but not
+// python3.exe, and python3 there can be the Microsoft Store stub, so try
+// python first on Windows.
+const pythonCommands = process.platform === 'win32' ? ['python', 'python3'] : ['python3', 'python'];
+
 async function generateCoverage(workspace: string): Promise<string> {
   if (!globSync(['.coverage', '.coverage.*'], { cwd: workspace }).some((path) => existsIn(workspace, path))) {
     throw new Error(
@@ -66,12 +71,20 @@ async function generateCoverage(workspace: string): Promise<string> {
   const output = join(temporary, 'coverage.json');
   const data = join(temporary, '.coverage');
   function run(...args: string[]) {
-    execFileSync('python3', ['-m', 'coverage', ...args], {
-      cwd: workspace,
-      stdio: 'pipe',
-      timeout: 30_000,
-      maxBuffer: 256 * 1024,
-    });
+    for (const [index, command] of pythonCommands.entries()) {
+      try {
+        execFileSync(command, ['-m', 'coverage', ...args], {
+          cwd: workspace,
+          stdio: 'pipe',
+          timeout: 30_000,
+          maxBuffer: 256 * 1024,
+        });
+        return;
+      } catch (error) {
+        const missing = (error as NodeJS.ErrnoException).code === 'ENOENT';
+        if (!missing || index === pythonCommands.length - 1) throw error;
+      }
+    }
   }
   try {
     try {

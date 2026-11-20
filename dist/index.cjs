@@ -153751,6 +153751,7 @@ async function readLimited(path4, limit) {
   }
   return Buffer.concat(chunks, size).toString("utf8");
 }
+var pythonCommands = process.platform === "win32" ? ["python", "python3"] : ["python3", "python"];
 async function generateCoverage(workspace) {
   if (!(0, import_node_fs4.globSync)([".coverage", ".coverage.*"], { cwd: workspace }).some((path4) => existsIn(workspace, path4))) {
     throw new Error(
@@ -153761,12 +153762,20 @@ async function generateCoverage(workspace) {
   const output = (0, import_node_path5.join)(temporary, "coverage.json");
   const data = (0, import_node_path5.join)(temporary, ".coverage");
   function run(...args) {
-    (0, import_node_child_process2.execFileSync)("python3", ["-m", "coverage", ...args], {
-      cwd: workspace,
-      stdio: "pipe",
-      timeout: 3e4,
-      maxBuffer: 256 * 1024
-    });
+    for (const [index, command] of pythonCommands.entries()) {
+      try {
+        (0, import_node_child_process2.execFileSync)(command, ["-m", "coverage", ...args], {
+          cwd: workspace,
+          stdio: "pipe",
+          timeout: 3e4,
+          maxBuffer: 256 * 1024
+        });
+        return;
+      } catch (error2) {
+        const missing = error2.code === "ENOENT";
+        if (!missing || index === pythonCommands.length - 1) throw error2;
+      }
+    }
   }
   try {
     try {

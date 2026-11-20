@@ -13,6 +13,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { after, test } from 'node:test';
 import { gunzipSync } from 'node:zlib';
 import { parse } from 'yaml';
@@ -36,7 +37,8 @@ function isolateBundle(bundle: string): string {
   copyFileSync(bundle, entrypoint);
   return entrypoint;
 }
-const preload = resolve('tests/action/mock-github.ts');
+// --import takes a URL; a bare absolute path fails on Windows (D:\\…).
+const preload = pathToFileURL(resolve('tests/action/mock-github.ts')).href;
 
 function scenario(t: { after(fn: () => void): void }) {
   const directory = mkdtempSync(join(tmpdir(), 'mustard-action-'));
@@ -117,7 +119,8 @@ async function uploadedFiles(fixture: ReturnType<typeof scenario>) {
   return JSON.parse(gunzipSync(coverage).toString()).files;
 }
 
-const coveragePy = spawnSync('python3', ['-m', 'coverage', '--version'], { timeout: 5_000 }).status === 0;
+const python = process.platform === 'win32' ? 'python' : 'python3';
+const coveragePy = spawnSync(python, ['-m', 'coverage', '--version'], { timeout: 5_000 }).status === 0;
 const pythonOptions = {
   skip: coveragePy ? false : 'Install tests/fixtures/requirements.txt to test raw coverage.py uploads',
 };
@@ -133,7 +136,7 @@ for (const mode of ['single', 'parallel', 'mixed']) {
     for (const [index, value] of runs.entries()) {
       const parallel = mode === 'parallel' || index > 0;
       const run = spawnSync(
-        'python3',
+        python,
         ['-m', 'coverage', 'run', '--branch', ...(parallel ? ['--parallel-mode'] : []), 'example.py', value],
         { cwd: fixture.directory, encoding: 'utf8', timeout: 5_000 },
       );

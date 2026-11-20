@@ -9,7 +9,14 @@ permissions:
 
 jobs:
   action:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -21,10 +28,18 @@ jobs:
       - run: npm ci
       - name: Install coverage.py for integration tests
         run: |
-          python3 -m venv "$RUNNER_TEMP/mustard-python"
-          "$RUNNER_TEMP/mustard-python/bin/python3" -m pip install -r tests/fixtures/requirements.txt
-          echo "$RUNNER_TEMP/mustard-python/bin" >> "$GITHUB_PATH"
+          # Windows venvs use Scripts/python.exe, and python3 there can be the
+          # Microsoft Store stub.
+          if [[ "$RUNNER_OS" == Windows ]]; then python=python; bin=Scripts; else python=python3; bin=bin; fi
+          "$python" -m venv "$RUNNER_TEMP/mustard-python"
+          "$RUNNER_TEMP/mustard-python/$bin/python" -m pip install -r tests/fixtures/requirements.txt
+          echo "$RUNNER_TEMP/mustard-python/$bin" >> "$GITHUB_PATH"
       - run: npm run test:action
+
+      # --import takes a URL; a bare absolute path fails on Windows (D:\…).
+      - name: Resolve the GitHub API mock
+        run: |
+          node -e "console.log('MUSTARD_MOCK=' + require('node:url').pathToFileURL('tests/action/mock-github.ts').href)" >> "$GITHUB_ENV"
 
       - name: Prepare coverage input
         shell: bash
@@ -46,7 +61,7 @@ jobs:
       - name: Upload coverage using the action manifest
         uses: ./
         env:
-          NODE_OPTIONS: --import="${{ github.workspace }}/tests/action/mock-github.ts"
+          NODE_OPTIONS: --import=${{ env.MUSTARD_MOCK }}
         with:
           github-token: mustard-test-github-token
           mode: upload
@@ -58,7 +73,7 @@ jobs:
         id: report
         uses: ./
         env:
-          NODE_OPTIONS: --import="${{ github.workspace }}/tests/action/mock-github.ts"
+          NODE_OPTIONS: --import=${{ env.MUSTARD_MOCK }}
 
         with:
           github-token: mustard-test-github-token
@@ -67,7 +82,7 @@ jobs:
         id: comment
         uses: ./
         env:
-          NODE_OPTIONS: --import="${{ github.workspace }}/tests/action/mock-github.ts"
+          NODE_OPTIONS: --import=${{ env.MUSTARD_MOCK }}
           MUSTARD_TEST_EVENT: workflow_run
         with:
           github-token: mustard-test-github-token
@@ -91,7 +106,7 @@ jobs:
         continue-on-error: true
         uses: ./
         env:
-          NODE_OPTIONS: --import="${{ github.workspace }}/tests/action/mock-github.ts"
+          NODE_OPTIONS: --import=${{ env.MUSTARD_MOCK }}
         with:
           github-token: mustard-test-github-token
           mode: invalid

@@ -14,7 +14,9 @@ jobs:
       enable-docs: true
 
   ## start-custom-ci-checks
-  test:
+  # OS-independent checks run once. Windows checkouts use CRLF, which the
+  # formatter and the bundle drift check would misreport.
+  checks:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -32,18 +34,42 @@ jobs:
       - run: npm run build
       - run: git ls-files --error-unmatch dist/index.cjs dist/index.cjs.LEGAL.txt
       - run: git diff --exit-code -- dist/
+
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: mise.toml
+          cache: npm
+      - run: npm ci
       - name: Install coverage.py for integration tests
         run: |
-          python3 -m venv "$RUNNER_TEMP/mustard-python"
-          "$RUNNER_TEMP/mustard-python/bin/python3" -m pip install -r tests/fixtures/requirements.txt
-          echo "$RUNNER_TEMP/mustard-python/bin" >> "$GITHUB_PATH"
+          # Windows venvs use Scripts/python.exe, and python3 there can be the
+          # Microsoft Store stub.
+          if [[ "$RUNNER_OS" == Windows ]]; then python=python; bin=Scripts; else python=python3; bin=bin; fi
+          "$python" -m venv "$RUNNER_TEMP/mustard-python"
+          "$RUNNER_TEMP/mustard-python/$bin/python" -m pip install -r tests/fixtures/requirements.txt
+          echo "$RUNNER_TEMP/mustard-python/$bin" >> "$GITHUB_PATH"
       - run: npm run coverage
       - uses: ./
         if: always() && !cancelled() && hashFiles('lcov.info') != ''
         with:
           mode: upload
           files: lcov.info
-          shard: test
+          shard: ${{ runner.os }}
 
   test-action:
     uses: ./.github/workflows/action-tests.yaml
@@ -74,7 +100,7 @@ jobs:
   # The single required check for rulesets. It fails if any job it needs
   # failed or was cancelled.
   checks-complete:
-    needs: [repo-checks, test, test-action, coverage]
+    needs: [repo-checks, checks, test, test-action, coverage]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}
