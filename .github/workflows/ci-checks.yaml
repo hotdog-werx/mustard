@@ -66,4 +66,20 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./
+        with:
+          # Mustard's verdicts are check runs, not jobs. Fail this job on a
+          # failed coverage check so checks-complete sees it.
+          fail-ci: 'true'
+
+  # The single required check for rulesets. It fails if any job it needs
+  # failed or was cancelled.
+  checks-complete:
+    needs: [repo-checks, test, test-action, coverage]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - uses: hotdog-werx/checks-complete-action@3c9b8daa70459d2e906d4c8c8926b3c599430e12 # 0.1.1
+        with:
+          needs-jobs: ${{ toJSON(needs) }}
   ## end-custom-ci-checks
