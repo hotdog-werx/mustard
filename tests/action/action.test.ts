@@ -456,6 +456,21 @@ test('publishes a timestamped attestation for the exact push report digest', (t)
   ]);
 });
 
+test('a private repository without attestations records the refusal and keeps its baseline', (t) => {
+  const fixture = scenario(t);
+  fixture.writeCoverage(fullCoverage);
+  const env = { MUSTARD_TEST_PLAN_LIMIT: 'true' };
+  const push = { ...env, MUSTARD_TEST_EVENT: 'push' };
+  ok(fixture.run({ mode: 'upload', files: 'lcov.info' }, push));
+  const signed = ok(fixture.run({}, push));
+  assert.match(signed.stdout, /attestations are unavailable/i);
+  assert.ok(fixture.state().archives.some((archive) => archive.name === `mustard-report-${base}-unattested`));
+  ok(fixture.run({ mode: 'upload', files: 'lcov.info' }, env));
+  const report = ok(fixture.run({}, env));
+  assert.equal(report.outputs['baseline-sha'], base);
+  assert.match(report.stdout, /Accepting unsigned baseline/);
+});
+
 test('rejects an otherwise valid baseline when the required attestation is missing', (t) => {
   const fixture = scenario(t);
   fixture.writeCoverage(fullCoverage);

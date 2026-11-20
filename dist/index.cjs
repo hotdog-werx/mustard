@@ -150473,6 +150473,9 @@ async function readBaseline(bytes, commit, runId, attempt, workflow) {
   if (!flags.size) throw new Error("Baseline report has no coverage data");
   return flags;
 }
+function unattestedName(reportName) {
+  return `${reportName}-unattested`;
+}
 function reportArtifactName(namespace, commit, attempt) {
   const base = `${namespace.artifact}-report-${commit}`;
   return attempt === 1 ? base : `${base}-attempt-${attempt}`;
@@ -152690,7 +152693,7 @@ async function protectedBranch(api, event, branch) {
   const { data } = await api.rest.repos.getBranch({ ...event.repo, branch });
   return data.protected;
 }
-async function signReport(api, event, name, digest, token, config) {
+async function signReport(api, event, name, digest, token, config, retentionDays) {
   if (config.baseline.attestations === "off") return;
   try {
     const { bundle } = await attestProvenance({
@@ -152704,6 +152707,19 @@ async function signReport(api, event, name, digest, token, config) {
     if (config.baseline.attestations === "auto" && unsupported(error2) && !await publicRepository(api, event.repo)) {
       warning(
         "Artifact attestations are unavailable on this repository plan. Using workflow and artifact provenance."
+      );
+      await putArtifact(
+        unattestedName(name),
+        /* @__PURE__ */ new Map([
+          [
+            "unattested.json",
+            JSON.stringify({
+              status: statusCode(error2),
+              message: (error2 instanceof Error ? error2.message : "").slice(0, 500)
+            })
+          ]
+        ]),
+        retentionDays
       );
       return;
     }
@@ -152793,7 +152809,7 @@ var Provenance = class {
       "Artifact attestations are unavailable on this repository plan. Using workflow and artifact provenance."
     );
   }
-  async verify(name, digest, run, attempt = run.run_attempt ?? 1) {
+  async verify(name, digest, run, attempt = run.run_attempt ?? 1, unattested = false) {
     if (this.config.baseline.attestations === "off" || this.unavailable) return;
     const auto = this.config.baseline.attestations === "auto";
     let entries;
@@ -152806,9 +152822,16 @@ var Provenance = class {
       entries = data.attestations ?? [];
     } catch (error2) {
       if (auto && unsupported(error2) && !await this.isPublic()) return this.fallBack();
-      throw error2;
+      if (statusCode(error2) !== 404) throw error2;
+      entries = [];
     }
-    if (!entries.length) throw new Error("No attestation found for the coverage artifact");
+    if (!entries.length) {
+      if (auto && unattested && !await this.isPublic()) {
+        warning(`Accepting unsigned baseline ${name}: its run recorded that attestations are unavailable.`);
+        return;
+      }
+      throw new Error("No attestation found for the coverage artifact");
+    }
     this.verifier ??= this.isPublic().then((isPublic) => createVerifier(!isPublic));
     const verifier = await this.verifier;
     const policy = attestationPolicy(this.event, run, this.config.baseline.selfHosted, attempt);
@@ -152851,7 +152874,8 @@ async function findBaseline(api, event, start, token, config, namespace) {
           const artifact = artifacts.find((entry) => entry.name === name && !entry.expired);
           if (!artifact) continue;
           const { bytes, digest } = await downloadArtifact(event.repo, artifact, token);
-          await provenance.verify(name, digest, run, attempt);
+          const unattested = artifacts.some((entry) => entry.name === unattestedName(name) && !entry.expired);
+          await provenance.verify(name, digest, run, attempt, unattested);
           const flags = await readBaseline(bytes, commit, run.id, attempt, run.path);
           return { sha: commit, runId: run.id, distance, flags };
         }
@@ -154065,7 +154089,7 @@ async function main() {
     );
     reportId = id;
     if (event.branch && isProtectedSource(event, config.baseline.branches) && await protectedBranch(api, event, event.branch)) {
-      await signReport(api, event, name, digest, token, config);
+      await signReport(api, event, name, digest, token, config, retention());
     }
     if (config.html && mode === "report") {
       const { id: id2 } = await uploadHtml(report, config, event, namespace, event.fork ? void 0 : workspace);

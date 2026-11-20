@@ -111,7 +111,7 @@ async function main() {
       isProtectedSource(event, config.baseline.branches) &&
       (await protectedBranch(api, event, event.branch))
     ) {
-      await signReport(api, event, name, digest, token, config);
+      await signReport(api, event, name, digest, token, config, retention());
     }
     if (config.html && mode === 'report') {
       const { id } = await uploadHtml(report, config, event, namespace, event.fork ? undefined : workspace);

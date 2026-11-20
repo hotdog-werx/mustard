@@ -7,7 +7,14 @@ import { bundleFromJSON } from '@sigstore/bundle';
 import { getTrustedRoot } from '@sigstore/tuf';
 import { toSignedEntity, toTrustMaterial, Verifier } from '@sigstore/verify';
 import type { VerificationPolicy } from '@sigstore/verify';
-import { downloadArtifact, listArtifacts, readBaseline, reportArtifactName } from './artifacts.ts';
+import {
+  downloadArtifact,
+  listArtifacts,
+  putArtifact,
+  readBaseline,
+  reportArtifactName,
+  unattestedName,
+} from './artifacts.ts';
 import type { Names } from './artifacts.ts';
 import type { Config } from './config.ts';
 import { record } from './coverage.ts';
@@ -66,6 +73,7 @@ export async function signReport(
   digest: string,
   token: string,
   config: Config,
+  retentionDays?: number,
 ) {
   if (config.baseline.attestations === 'off') return;
   try {
@@ -84,6 +92,21 @@ export async function signReport(
     ) {
       warning(
         'Artifact attestations are unavailable on this repository plan. Using workflow and artifact provenance.',
+      );
+      // GitHub answers a later list request with a bare 404, so record the
+      // refusal where only this trusted run can write it.
+      await putArtifact(
+        unattestedName(name),
+        new Map([
+          [
+            'unattested.json',
+            JSON.stringify({
+              status: statusCode(error),
+              message: (error instanceof Error ? error.message : '').slice(0, 500),
+            }),
+          ],
+        ]),
+        retentionDays,
       );
       return;
     }
@@ -196,7 +219,13 @@ export class Provenance {
     );
   }
 
-  async verify(name: string, digest: string, run: Run, attempt = run.run_attempt ?? 1): Promise<void> {
+  async verify(
+    name: string,
+    digest: string,
+    run: Run,
+    attempt = run.run_attempt ?? 1,
+    unattested = false,
+  ): Promise<void> {
     if (this.config.baseline.attestations === 'off' || this.unavailable) return;
     const auto = this.config.baseline.attestations === 'auto';
     let entries: unknown[];
@@ -209,9 +238,18 @@ export class Provenance {
       entries = data.attestations ?? [];
     } catch (error) {
       if (auto && unsupported(error) && !(await this.isPublic())) return this.fallBack();
-      throw error;
+      if (statusCode(error) !== 404) throw error;
+      entries = [];
     }
-    if (!entries.length) throw new Error('No attestation found for the coverage artifact');
+    if (!entries.length) {
+      // The producing run recorded that GitHub refused to sign for a plan
+      // limit. Public repositories always support attestations.
+      if (auto && unattested && !(await this.isPublic())) {
+        warning(`Accepting unsigned baseline ${name}: its run recorded that attestations are unavailable.`);
+        return;
+      }
+      throw new Error('No attestation found for the coverage artifact');
+    }
     this.verifier ??= this.isPublic().then((isPublic) => createVerifier(!isPublic));
     const verifier = await this.verifier;
     const policy = attestationPolicy(this.event, run, this.config.baseline.selfHosted, attempt);
@@ -270,7 +308,8 @@ export async function findBaseline(
           const artifact = artifacts.find((entry) => entry.name === name && !entry.expired);
           if (!artifact) continue;
           const { bytes, digest } = await downloadArtifact(event.repo, artifact, token);
-          await provenance.verify(name, digest, run, attempt);
+          const unattested = artifacts.some((entry) => entry.name === unattestedName(name) && !entry.expired);
+          await provenance.verify(name, digest, run, attempt, unattested);
           const flags = await readBaseline(bytes, commit, run.id, attempt, run.path);
           return { sha: commit, runId: run.id, distance, flags };
         }

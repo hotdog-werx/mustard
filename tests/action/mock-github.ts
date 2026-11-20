@@ -39,7 +39,10 @@ const runId = eventKind === 'push' ? 6 : eventKind === 'workflow_run' ? 8 : 7;
 const attempt = process.env.MUSTARD_TEST_ATTEMPT ?? (eventKind === 'push' ? '1' : '2');
 const eventFile = join(directory, 'event.json');
 const signPush = eventKind === 'push' && process.env.MUSTARD_TEST_SIGN === 'true';
-const repository = { default_branch: 'main', visibility: signPush ? 'private' : 'public' };
+// A private repository on a plan without attestations, with auto attestations.
+const planLimit = process.env.MUSTARD_TEST_PLAN_LIMIT === 'true';
+const signing = signPush || (planLimit && eventKind === 'push');
+const repository = { default_branch: 'main', visibility: signPush || planLimit ? 'private' : 'public' };
 const badgeTip = process.env.MUSTARD_TEST_BADGE_TIP;
 
 writeFileSync(
@@ -54,7 +57,7 @@ writeFileSync(
 Object.assign(process.env, {
   ...(process.env.MUSTARD_TEST_WORKSPACE ? { GITHUB_WORKSPACE: process.env.MUSTARD_TEST_WORKSPACE } : {}),
   GITHUB_API_URL: api,
-  GITHUB_SERVER_URL: signPush ? 'https://github.com' : 'http://mustard.localhost',
+  GITHUB_SERVER_URL: signing ? 'https://github.com' : 'http://mustard.localhost',
   GITHUB_EVENT_NAME: eventKind,
   GITHUB_EVENT_PATH: eventFile,
   GITHUB_REPOSITORY: repo,
@@ -87,7 +90,7 @@ function noRoute(method: string, route: string): [number, { message: string }] {
 }
 
 nock.disableNetConnect();
-if (signPush) mockSigning();
+if (signing) mockSigning();
 
 const github = nock(api, { reqheaders: { authorization: `token ${githubToken}` } }).persist();
 github.get(/.*/).reply((request: Request) => {
@@ -139,7 +142,9 @@ github.get(/.*/).reply((request: Request) => {
         ? 'require_uploads: false\ncomment: {behavior: off}'
         : required
           ? 'require_uploads: true\nbaseline: {attestations: required, required: true, max_walk: 0}'
-          : baseConfig;
+          : planLimit
+            ? 'require_uploads: true\nbaseline: {attestations: auto, required: true, max_walk: 0}'
+            : baseConfig;
     const headConfig = ref === head ? process.env.MUSTARD_TEST_HEAD_CONFIG : undefined;
     const text = (headConfig ?? config) + (process.env.MUSTARD_TEST_CONFIG_SUFFIX ?? '');
     return [
@@ -196,6 +201,9 @@ github.get(/.*/).reply((request: Request) => {
         : { parents: [{ sha: base }], message: 'Existing project branch' },
     ];
   if (route === `/commits/${base}`) return [200, { parents: [] }];
+  if (route === '') return [200, repository];
+  // Verbatim from GitHub: listing on a repository without attestations is a bare 404.
+  if (route.startsWith('/attestations/sha256:') && planLimit) return [404, { message: 'Not Found' }];
   if (route.startsWith('/attestations/sha256:')) return [200, { attestations: [] }];
   return noRoute('GET', route);
 });
@@ -213,6 +221,14 @@ for (const method of ['POST', 'PATCH'] as const) {
         : [404, { message: 'Ref not found' }];
     if (route === '/git/refs' && method === 'POST') return [201, { ref: 'refs/heads/mustard-badges' }];
     if (route === '/attestations' && signPush) return [201, { id: 'test-attestation' }];
+    if (route === '/attestations' && planLimit)
+      return [
+        422,
+        {
+          message:
+            'Feature not available for user-owned private repositories. To enable this feature, please make this repository public.',
+        },
+      ];
     if (route === '/check-runs' && process.env.MUSTARD_TEST_DENY === 'checks')
       return [403, { message: 'Resource not accessible by integration' }];
     if (route === '/issues/5/comments' && process.env.MUSTARD_TEST_DENY === 'comments')

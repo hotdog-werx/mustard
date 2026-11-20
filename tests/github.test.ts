@@ -492,7 +492,7 @@ test('auto attestation policy falls back only where GitHub cannot offer attestat
   await assert.rejects(strict.verify('report', 'digest', run), /not available/);
   // Every public repository supports attestations, so a missing one is never excused.
   const publicRepo = new Provenance(withError(notFound, 'public').api, event, readConfig());
-  await assert.rejects(publicRepo.verify('report', 'digest', run), /Not Found/);
+  await assert.rejects(publicRepo.verify('report', 'digest', run), /No attestation found/);
   const publicPlan = new Provenance(withError(plan, 'public').api, event, readConfig());
   await assert.rejects(publicPlan.verify('report', 'digest', run), /not available/);
   const forbidden = new Provenance(withError(permission).api, event, readConfig());
@@ -509,9 +509,32 @@ test('a missing or inaccessible private attestation never disables checks on lat
     rest: { repos: { listAttestations, get: async () => ({ data: { visibility: 'private' } }) } },
   } as unknown as GitHub;
   const provenance = new Provenance(api, event, readConfig());
-  await assert.rejects(provenance.verify('report', 'inaccessible', run), /Not Found/);
+  await assert.rejects(provenance.verify('report', 'inaccessible', run), /No attestation found/);
   await assert.rejects(provenance.verify('another-report', 'unsigned', run), /No attestation found/);
   assert.equal(listAttestations.mock.callCount(), 2);
+});
+
+test("an unsigned private baseline is accepted only with its run's plan-limit marker", async (t) => {
+  const listAttestations = t.mock.fn(async () => {
+    throw Object.assign(new Error('Not Found'), { status: 404 });
+  });
+  const repoApi = (visibility: string) =>
+    ({
+      rest: { repos: { listAttestations, get: async () => ({ data: { visibility } }) } },
+    }) as unknown as GitHub;
+  const attempt = run.run_attempt ?? 1;
+  const auto = new Provenance(repoApi('private'), event, readConfig());
+  await auto.verify('report', 'digest', run, attempt, true);
+  // The marker is per artifact evidence, so it does not excuse later candidates.
+  await assert.rejects(auto.verify('other', 'digest', run, attempt, false), /No attestation found/);
+  const onPublic = new Provenance(repoApi('public'), event, readConfig());
+  await assert.rejects(onPublic.verify('report', 'digest', run, attempt, true), /No attestation found/);
+  const required = new Provenance(
+    repoApi('private'),
+    event,
+    readConfig('baseline: {attestations: required}'),
+  );
+  await assert.rejects(required.verify('report', 'digest', run, attempt, true), /No attestation found/);
 });
 
 test('reports a useful failure when GitHub refuses to download an artifact', async () => {

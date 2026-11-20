@@ -302,6 +302,12 @@ export async function readBaseline(
   return flags;
 }
 
+// Uploaded by a trusted push run when GitHub refuses to sign its report for a
+// plan limit. Verification accepts an unsigned private baseline only with it.
+export function unattestedName(reportName: string) {
+  return `${reportName}-unattested`;
+}
+
 export function reportArtifactName(namespace: Names, commit: string, attempt: number) {
   const base = `${namespace.artifact}-report-${commit}`;
   // Keep the first attempt immutable and give reruns their own report.
