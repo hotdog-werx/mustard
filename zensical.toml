@@ -4,14 +4,41 @@ site_description = "Project and patch coverage using GitHub Actions artifacts"
 site_url = "https://hotdog-werx.github.io/mustard/"
 repo_url = "https://github.com/hotdog-werx/mustard"
 repo_name = "hotdog-werx/mustard"
+
 nav = [
   { Home = "index.md" },
-  { Configuration = "configuration.md" },
+  { "Getting Started" = [{ "Quick Start" = "quick-start.md" }, { Configuration = "configuration.md" }, { Troubleshooting = "troubleshooting.md" }] },
+  { "GitHub Actions" = [{ "Action Reference" = "github-actions/action.md" }, { "Workflow Recipes" = "github-actions/workflow-recipes.md" }] },
+  { Concepts = [{ "Storage and Trust" = "concepts/storage.md" }] },
 ]
 
 [project.theme]
-features = ["content.code.copy", "navigation.footer", "search.highlight"]
+language = "en"
+features = [
+  "content.code.copy",
+  "content.code.select",
+  "navigation.footer",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.tabs",
+  "navigation.top",
+  "search.highlight",
+]
 
-[project.theme.palette]
+[[project.theme.palette]]
+scheme = "default"
 primary = "amber"
 accent = "amber"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+scheme = "slate"
+primary = "amber"
+accent = "amber"
+toggle.icon = "lucide/moon-star"
+toggle.name = "Switch to light mode"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/hotdog-werx"

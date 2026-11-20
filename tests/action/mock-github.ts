@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import nock from 'nock';
+import { mockSigning } from './mock-signing.ts';
 import {
   api,
   base,
@@ -37,7 +38,8 @@ const fork = process.env.MUSTARD_TEST_FORK === 'true' || eventKind === 'workflow
 const runId = eventKind === 'push' ? 6 : eventKind === 'workflow_run' ? 8 : 7;
 const attempt = process.env.MUSTARD_TEST_ATTEMPT ?? (eventKind === 'push' ? '1' : '2');
 const eventFile = join(directory, 'event.json');
-const repository = { default_branch: 'main', visibility: 'public' };
+const signPush = eventKind === 'push' && process.env.MUSTARD_TEST_SIGN === 'true';
+const repository = { default_branch: 'main', visibility: signPush ? 'private' : 'public' };
 
 writeFileSync(
   eventFile,
@@ -51,7 +53,7 @@ writeFileSync(
 Object.assign(process.env, {
   ...(process.env.MUSTARD_TEST_WORKSPACE ? { GITHUB_WORKSPACE: process.env.MUSTARD_TEST_WORKSPACE } : {}),
   GITHUB_API_URL: api,
-  GITHUB_SERVER_URL: 'http://mustard.localhost',
+  GITHUB_SERVER_URL: signPush ? 'https://github.com' : 'http://mustard.localhost',
   GITHUB_EVENT_NAME: eventKind,
   GITHUB_EVENT_PATH: eventFile,
   GITHUB_REPOSITORY: repo,
@@ -84,6 +86,7 @@ function noRoute(method: string, route: string): [number, { message: string }] {
 }
 
 nock.disableNetConnect();
+if (signPush) mockSigning();
 
 const github = nock(api, { reqheaders: { authorization: `token ${githubToken}` } }).persist();
 github.get(/.*/).reply((request: Request) => {
@@ -92,7 +95,11 @@ github.get(/.*/).reply((request: Request) => {
   record('GET', route, null);
   if (route === '/actions/runs/7') return [200, forkRun];
   if (route === '/pulls') return [200, [pull(fork)]];
-  if (route === '/pulls/5') return [200, pull(fork)];
+  if (route === '/pulls/5') {
+    const current = pull(fork);
+    if (process.env.MUSTARD_TEST_PR_UPDATED === 'true') current.head.sha = merge;
+    return [200, current];
+  }
   if (route.startsWith('/compare/')) {
     return [
       200,
@@ -102,22 +109,29 @@ github.get(/.*/).reply((request: Request) => {
           {
             filename: 'src/example.ts',
             status: 'modified',
-            additions: 2,
+            additions: process.env.MUSTARD_TEST_INCOMPLETE_DIFF === 'true' ? 3 : 2,
             patch: '@@ -1,2 +1,2 @@\n-old\n-old\n+one\n+two',
           },
         ],
       },
     ];
   }
-  if (route === '/contents/.github/mustard.yml') {
+  if (route.startsWith('/contents/') && process.env.MUSTARD_TEST_NO_CONFIG === 'true')
+    return [404, { message: 'Not Found' }];
+  if (route === '/contents/.github/mustard.yml' && process.env.MUSTARD_TEST_CODECOV === 'true')
+    return [404, { message: 'Not Found' }];
+  if (route === '/contents/mustard.yml') return [404, { message: 'Not Found' }];
+  if (route === '/contents/.github/mustard.yml' || route === '/contents/codecov.yml') {
     const ref = url.searchParams.get('ref');
-    const required = process.env.MUSTARD_TEST_REQUIRE_ATTESTATION === 'true';
-    const text =
+    const required = signPush || process.env.MUSTARD_TEST_REQUIRE_ATTESTATION === 'true';
+    const config =
       fork && ref === head
         ? 'require_uploads: false\ncomment: {behavior: off}'
         : required
           ? 'require_uploads: true\nbaseline: {attestations: required, required: true, max_walk: 0}'
           : baseConfig;
+    const headConfig = ref === head ? process.env.MUSTARD_TEST_HEAD_CONFIG : undefined;
+    const text = (headConfig ?? config) + (process.env.MUSTARD_TEST_CONFIG_SUFFIX ?? '');
     return [
       200,
       { type: 'file', encoding: 'base64', size: text.length, content: Buffer.from(text).toString('base64') },
@@ -151,6 +165,15 @@ github.get(/.*/).reply((request: Request) => {
     return [200, { total_count: artifacts.length, artifacts }];
   }
   if (route === '/issues/5/comments') return [200, []];
+  if (route === '/branches/main') return [200, { name: 'main', protected: true, commit: { sha: base } }];
+  if (route === '/branches/mustard-badges') {
+    if (process.env.MUSTARD_TEST_EXISTING_BADGE_BRANCH === 'true')
+      return [200, { name: 'mustard-badges', protected: false, commit: { sha: 'existing-tip' } }];
+    return [404, { message: 'Branch not found' }];
+  }
+  if (route === '/git/commits/existing-tip')
+    return [200, { parents: [{ sha: base }], message: 'Existing project branch' }];
+  if (route === `/commits/${base}`) return [200, { parents: [] }];
   if (route.startsWith('/attestations/sha256:')) return [200, { attestations: [] }];
   return noRoute('GET', route);
 });
@@ -160,6 +183,16 @@ for (const method of ['POST', 'PATCH'] as const) {
     const body = await request.json();
     const route = decodeURIComponent(new URL(request.url).pathname).replace(`/repos/${repo}`, '');
     record(method, route, body);
+    if (route === '/git/trees' && method === 'POST') return [201, { sha: 'badge-tree' }];
+    if (route === '/git/commits' && method === 'POST') return [201, { sha: 'badge-commit' }];
+    if (route === '/git/refs/heads/mustard-badges' && method === 'PATCH')
+      return [404, { message: 'Ref not found' }];
+    if (route === '/git/refs' && method === 'POST') return [201, { ref: 'refs/heads/mustard-badges' }];
+    if (route === '/attestations' && signPush) return [201, { id: 'test-attestation' }];
+    if (route === '/check-runs' && process.env.MUSTARD_TEST_DENY === 'checks')
+      return [403, { message: 'Resource not accessible by integration' }];
+    if (route === '/issues/5/comments' && process.env.MUSTARD_TEST_DENY === 'comments')
+      return [403, { message: 'Resource not accessible by integration' }];
     if (route === '/check-runs') return [201, { id: 70 }];
     if (route === '/check-runs/70' || route === '/issues/5/comments') return [200, { id: 90 }];
     return noRoute(method, route);

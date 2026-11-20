@@ -13,3 +13,8 @@ conclusion through GitHub's workflow expressions. A test preload supplies
 synthetic GitHub events and API responses. These tests require no Docker or
 GitHub credentials. Mustard's regular CI separately exercises the GitHub-hosted
 artifact service when it reports this repository's coverage.
+
+`npm run coverage` runs the unit and action scenarios together against the
+TypeScript sources so the native V8 LCOV report includes the action's child
+processes. The standalone action suite and the `uses: ./` workflow exercise the
+production bundle.

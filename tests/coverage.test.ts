@@ -185,3 +185,94 @@ test('handles absent uploads, incomplete diffs, and non-coverable changes', () =
   assert.throws(() => readConfig('ignore: &a [*a]'));
   assert.throws(() => readConfig('coverage: {status: {patch: {default: {target: 101%}}}}'));
 });
+
+test('rejects malformed reports with a format-specific error', () => {
+  const cases: [string, string, RegExp][] = [
+    ['unrecognized coverage', 'auto', /Could not detect coverage format/],
+    ['<report/>', 'cobertura', /Unexpected coverage XML root/],
+    ['<coverage/>', 'cobertura', /no packages element/],
+    ['DA:1,1', 'lcov', /outside a source record/],
+    [
+      '{ "meta": {"format": 3}, "files": {"a.py": {"missing_lines": [1], "executed_lines": [2], "executed_branches": [[2]]}} }',
+      'coveragepy-json',
+      /Invalid coverage.py branch arc/,
+    ],
+    ['mode: unsupported', 'go', /Invalid Go coverage mode/],
+    ['mode: count\nmalformed', 'go', /Invalid Go coverprofile record/],
+  ];
+  for (const [report, format, message] of cases) assert.throws(() => parseCoverage(report, format), message);
+});
+
+test('applies Codecov path fixes and flag defaults while allowing individual overrides', () => {
+  const config = readConfig(`
+fixes:
+  - 'build/::src/'
+  - 'C:\\checkout:src'
+flag_management:
+  default_rules: {carryforward: true}
+  individual_flags:
+    - {name: backend, paths: ['src/backend/**']}
+    - {name: frontend, carryforward: false}
+flags:
+  backend: {status: true}
+coverage:
+  status: {project: true, patch: false}
+comment: {layout: 'header, files'}
+`);
+  assert.deepEqual(config.fixes, [
+    ['build/', 'src/'],
+    ['C:\\checkout', 'src'],
+  ]);
+  assert.deepEqual(config.flags.get('backend'), {
+    paths: ['src/backend/**'],
+    carryforward: true,
+    status: true,
+  });
+  assert.equal(config.flags.get('frontend')?.carryforward, false);
+  assert.deepEqual(
+    config.project.map(({ name }) => name),
+    ['project'],
+  );
+  assert.deepEqual(config.patch, []);
+  assert.deepEqual([...(config.comment.layout ?? [])], ['header', 'files']);
+});
+
+test('rejects invalid or ambiguous coverage configuration', () => {
+  const cases: Array<[string, RegExp]> = [
+    ['coverage: {round: sideways}', /Expected one of/],
+    ['require_uploads: nobody', /Expected a boolean/],
+    ['comment: {layout: [header]}', /Expected a string/],
+    ['ignore: [{source: anything}]', /Expected an array of strings/],
+    ['fixes: [missing-delimiter]', /Expected a path rewrite/],
+    ['coverage: {range: 80}', /Expected a string/],
+    ['coverage: {range: "80%"}', /formatted as 70/],
+    ['coverage: {range: "100...70"}', /must increase/],
+    ['comment: {behavior: [', /Invalid Mustard YAML/],
+    [
+      'component_management: {individual_components: [{component_id: client}, {component_id: client}]}',
+      /Duplicate component ID/,
+    ],
+    [
+      'component_management: {individual_components: [{component_id: client, statuses: [{type: patch}, {type: patch}]}]}',
+      /Duplicate component status type/,
+    ],
+  ];
+  for (const [yaml, message] of cases) assert.throws(() => readConfig(yaml), message);
+});
+
+test('a strict indirect-diff policy fails project coverage despite meeting the numerical target', () => {
+  const config = readConfig(`
+ignore: [docs/**]
+coverage: {status: {project: {default: {target: 20}}}}
+indirect_changes: fail
+flag_management: {default_rules: {carryforward: true}}
+`);
+  const baseline: FlagFiles = new Map([
+    ...views(previous),
+    ['existing', deserialize({ 'src/existing.ts': { lines: { 1: [1] } } })],
+  ]);
+  const report = compute(views(current), changes, config, baseline);
+  assert.deepEqual(report.carried, ['existing']);
+  assert.equal(report.checks[0].conclusion, 'failure');
+  assert.match(report.checks[0].message, /outside the diff/);
+});

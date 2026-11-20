@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { delimiter, join } from 'node:path';
 import { mock, test } from 'node:test';
 import { downloadArtifact, names, readBaseline, readZip } from '../src/artifacts.ts';
-import { assertSubject, attestationPolicy, findBaseline, trustedRun } from '../src/baseline.ts';
+import { assertSubject, attestationPolicy, findBaseline, Provenance, trustedRun } from '../src/baseline.ts';
 import { readConfig } from '../src/config.ts';
-import { compareFiles, newLines, parseGitDiff } from '../src/diff.ts';
+import { compareFiles, gitDiff, newLines, parseGitDiff } from '../src/diff.ts';
 import { resolvePull } from '../src/github.ts';
 import type { Event, GitHub, Pull, Run } from '../src/github.ts';
 import {
@@ -278,4 +281,221 @@ test('escapes PR comment data and updates only the Actions bot sticky comment', 
   await stickyComment(api, namespace, display);
   assert.equal(update.mock.calls[0].arguments[0].comment_id, 2);
   assert.equal(create.mock.callCount(), 0);
+});
+
+test('walks first parents to find the newest available verified baseline', async () => {
+  const checked: string[] = [];
+  const bytes = fixture('report.zip');
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  const start = 'c'.repeat(40);
+  const api = {
+    rest: {
+      actions: {
+        listWorkflowRunsForRepo: async ({ head_sha }: { head_sha: string }) => {
+          checked.push(head_sha);
+          return { data: { workflow_runs: head_sha === base ? [run] : [] } };
+        },
+        listWorkflowRunArtifacts: () => {},
+      },
+      repos: {
+        getCommit: async ({ ref }: { ref: string }) => {
+          assert.equal(ref, start);
+          return { data: { parents: [{ sha: base }, { sha: 'd'.repeat(40) }] } };
+        },
+      },
+    },
+    paginate: {
+      iterator: async function* () {
+        yield {
+          data: [
+            {
+              id: 31,
+              name: `mustard-report-${base}`,
+              size_in_bytes: bytes.length,
+              digest: `sha256:${digest}`,
+            },
+          ],
+        };
+      },
+    },
+  } as unknown as GitHub;
+  const fetch = mock.method(globalThis, 'fetch', async () => new Response(new Uint8Array(bytes)));
+  try {
+    const config = readConfig('baseline: {attestations: off, max_walk: 1}');
+    const baseline = await findBaseline(api, event, start, 'example', config, names(''));
+    assert.deepEqual(checked, [start, base]);
+    assert.equal(baseline?.sha, base);
+    assert.equal(baseline?.distance, 1);
+  } finally {
+    fetch.mock.restore();
+  }
+});
+
+test('auto attestation policy falls back for an unsupported plan and rejects missing permissions', async () => {
+  const plan = Object.assign(
+    new Error(
+      'Artifact attestations are unavailable on this repository plan. Attestations are not supported.',
+    ),
+    { status: 403 },
+  );
+  const permission = Object.assign(new Error('Resource not accessible by integration'), { status: 403 });
+  function withError(error: Error) {
+    const request = mock.fn(async () => {
+      throw error;
+    });
+    const api = { rest: { repos: { listAttestations: request } } } as unknown as GitHub;
+    return { api, request };
+  }
+  const unavailable = withError(plan);
+  const optional = new Provenance(unavailable.api, event, readConfig());
+  await optional.verify('report', 'digest', run);
+  await optional.verify('another-report', 'digest', run);
+  assert.equal(unavailable.request.mock.callCount(), 1);
+  const strict = new Provenance(unavailable.api, event, readConfig('baseline: {attestations: required}'));
+  await assert.rejects(strict.verify('report', 'digest', run), /not supported/);
+  const forbidden = new Provenance(withError(permission).api, event, readConfig());
+  await assert.rejects(forbidden.verify('report', 'digest', run), /not accessible/);
+});
+
+test('reports a useful failure when GitHub refuses to download an artifact', async () => {
+  const fetch = mock.method(globalThis, 'fetch', async () => new Response('Not Found', { status: 404 }));
+  try {
+    const artifact = { id: 5, name: 'report', expired: false, size_in_bytes: 10 };
+    await assert.rejects(downloadArtifact(repo, artifact, 'example'), /download failed \(HTTP 404\)/);
+  } finally {
+    fetch.mock.restore();
+  }
+});
+
+test('preserves or replaces existing comments according to the repository policy', async () => {
+  const namespace = names('');
+  const create = mock.fn(async (_params: Record<string, unknown>) => ({}));
+  const remove = mock.fn(async (_params: Record<string, unknown>) => ({}));
+  const api = {
+    rest: { issues: { listComments: () => {}, deleteComment: remove, createComment: create } },
+    paginate: {
+      iterator: async function* () {
+        yield {
+          data: [
+            {
+              id: 42,
+              user: { type: 'Bot', login: 'github-actions[bot]' },
+              body: `${namespace.marker}\nPrevious`,
+            },
+          ],
+        };
+      },
+    },
+  } as unknown as GitHub;
+  for (const behavior of ['once', 'new']) {
+    const config = readConfig(`comment: {behavior: ${behavior}}`);
+    const report = compute(new Map(), new Map(), config);
+    await stickyComment(api, namespace, { report, config, event, configChanged: false, hasUploads: false });
+    assert.equal(create.mock.callCount(), behavior === 'new' ? 1 : 0);
+  }
+  assert.equal(remove.mock.calls[0].arguments[0].comment_id, 42);
+  assert.equal(create.mock.calls[0].arguments[0].issue_number, pull.number);
+});
+
+test('explains indirect coverage regressions separately from changed files', () => {
+  const config = readConfig('comment: {max_files: 1}');
+  const previous = new Map([
+    [
+      'default',
+      deserialize({
+        'src/untouched-a.ts': { lines: { 1: [1] } },
+        'src/untouched-b.ts': { lines: { 1: [1] } },
+      }),
+    ],
+  ]);
+  const current = new Map([
+    [
+      'default',
+      deserialize({
+        'src/untouched-a.ts': { lines: { 1: [0] } },
+        'src/untouched-b.ts': { lines: { 1: [0] } },
+      }),
+    ],
+  ]);
+  const report = compute(current, new Map(), config, previous);
+  const body = markdown({
+    report,
+    config,
+    event,
+    configChanged: false,
+    hasUploads: true,
+    baseline: { sha: base, runId: 7, distance: 1 },
+  });
+  assert.match(body, /No coverable lines changed/);
+  assert.match(body, /1 first-parent commit/);
+  assert.match(body, /### Indirect changes/);
+  assert.match(body, /src\/untouched-a.ts/);
+  assert.match(body, /\+1 more file/);
+  assert.doesNotMatch(body, /### Changed files/);
+});
+
+test('gets the actual changed lines of two Git commits through a shallow fetch', {
+  skip: process.platform === 'win32' ? 'Fixture uses a POSIX Git transport shim' : false,
+}, (t) => {
+  const workspace = mkdtempSync(join(tmpdir(), 'mustard-git-fixture-'));
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+  const actualGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+  const checkout = join(workspace, 'fixture');
+  const bin = join(workspace, 'bin');
+  mkdirSync(checkout);
+  mkdirSync(bin);
+  const git = (...args: string[]) =>
+    execFileSync(actualGit, args, {
+      cwd: checkout,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+  git('init', '-q', '--template=');
+  const commit = (message: string) => {
+    git('add', 'example.ts');
+    git(
+      '-c',
+      'user.name=Mustard Test',
+      '-c',
+      'user.email=test@example.invalid',
+      '-c',
+      'commit.gpgsign=false',
+      'commit',
+      '-qm',
+      message,
+    );
+    return git('rev-parse', 'HEAD');
+  };
+  writeFileSync(join(checkout, 'example.ts'), 'const one = 1;\nconst two = 2;\n');
+  const oldSha = commit('initial');
+  writeFileSync(join(checkout, 'example.ts'), 'const one = 1;\nconst updated = 2;\n');
+  const newSha = commit('update one line');
+
+  const shellQuote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
+  writeFileSync(
+    join(bin, 'git'),
+    `#!/bin/sh
+if [ "$1" = fetch ]; then
+  shift 4
+  exec ${shellQuote(actualGit)} fetch --no-tags --depth=1 ${shellQuote(`file://${checkout}`)} "$@"
+fi
+exec ${shellQuote(actualGit)} "$@"
+`,
+    { mode: 0o755 },
+  );
+
+  const previousPath = process.env.PATH;
+  const previousServer = process.env.GITHUB_SERVER_URL;
+  process.env.PATH = [bin, previousPath].join(delimiter);
+  process.env.GITHUB_SERVER_URL = 'https://mustard.invalid';
+  try {
+    const diff = gitDiff({ ...event, commit: newSha }, oldSha, 'fixture-token');
+    assert.deepEqual([...diff.keys()], ['example.ts']);
+    assert.deepEqual([...(diff.get('example.ts')?.lines ?? [])], [2]);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    if (previousServer === undefined) delete process.env.GITHUB_SERVER_URL;
+    else process.env.GITHUB_SERVER_URL = previousServer;
+  }
 });

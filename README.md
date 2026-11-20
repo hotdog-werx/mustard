@@ -5,6 +5,9 @@ coverage. It stores coverage in Actions artifacts and publishes checks,
 annotations, a step summary, and a sticky PR comment. It uses the workflow's
 `GITHUB_TOKEN`.
 
+See the [docs index](docs/index.md) for workflow recipes, troubleshooting, and
+[what Mustard stores](docs/concepts/storage.md).
+
 ## Quick start
 
 Produce a coverage report in your test job. Add an upload step in each matrix
@@ -156,7 +159,18 @@ Run `mise run test-action` for the bundled action tests. CI also invokes the
 action with `uses: ./` and checks its outputs and step result in the runner. See
 the [action test guide](tests/action/README.md).
 
-Maintainers publish from the default branch using the release workflow after
-updating the package version. Protect immutable version tags and allow the
-workflow to move the major tag. Consumers can pin the release commit SHA in
-`uses:`.
+## Releasing
+
+Set `RELEEZ_GITHUB_TOKEN` to a token that can open pull requests. From a clean
+working tree, run `mise exec -- releez release start` to prepare a release PR
+from `master`. For the first release, pass `--version-override 0.1.0` to match
+the initial package version. Releez updates the changelog, bumps both npm
+manifests, and rebuilds the action bundle before committing. Use `--dry-run` to
+preview the version and notes.
+
+Merging a same-repository `release/<version>` PR into `master` runs
+`finalize-release.yaml`. The workflow checks the merged bundle, builds and
+attests the action ZIP, and uses Releez to create the exact version tag and move
+the major tag. It then publishes the GitHub Release with the ZIP and generated
+notes. For example, release `0.1.0` uses the tag `0.1.0` and the moving alias
+`v0`. Consumers can pin the release commit SHA in `uses:`.

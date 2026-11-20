@@ -11,7 +11,7 @@
     "check": "tsc --noEmit",
     "lint": "biome check --linter-enabled=true --formatter-enabled=true --assist-enabled=false src tests",
     "test": "node --experimental-test-coverage --test tests/*.test.ts",
-    "coverage": "node --experimental-test-coverage --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=lcov.info tests/*.test.ts",
+    "coverage": "node --env-file=tests/fixtures/coverage.env --experimental-test-coverage --test --test-coverage-include=\"src/**/*.ts\" --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=lcov.info tests/*.test.ts tests/action/*.test.ts",
     "format": "biome format --write src tests",
     "test:action": "npm run build && node --test tests/action/*.test.ts"
   },
@@ -21,10 +21,10 @@
     "@actions/core": "3.0.1",
     "@actions/github": "9.1.1",
     "@sigstore/bundle": "5.0.1",
+    "@sigstore/tuf": "5.0.1",
     "@sigstore/verify": "4.1.3",
     "picomatch": "4.0.7",
     "saxes": "6.0.0",
-    "sigstore": "5.0.1",
     "yaml": "2.9.1",
     "yauzl": "3.4.0"
   },
@@ -36,5 +36,17 @@
     "esbuild": "0.28.2",
     "nock": "15.0.6",
     "typescript": "7.0.2"
+  },
+  "overrides": {
+    "@actions/attest": {
+      "@sigstore/bundle": "$@sigstore/bundle",
+      "@sigstore/sign": "5.1.0"
+    },
+    "archiver-utils": {
+      "glob": "14.0.6"
+    }
+  },
+  "allowScripts": {
+    "esbuild": false
   }
 }
