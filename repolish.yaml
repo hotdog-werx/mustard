@@ -1,6 +1,10 @@
 providers:
   workspace:
     cli: devkit-workspace-link
+    overrides:
+      file_mappings:
+        # Mustard separates the Pages upload and deploy to avoid an artifact lookup race.
+        .github/workflows/deploy-docs.yaml: false
     context_overrides:
       devkit_ref: &devkit-ref 0de802099634a9675c03f564ad0b84711c709693
 
