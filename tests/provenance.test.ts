@@ -54,12 +54,12 @@ after(() => {
   else process.env.GITHUB_SERVER_URL = previousServer;
 });
 
-function provenance() {
+function provenance(bundles: unknown[] = [signed.bundle]) {
   const api = {
     rest: {
       repos: {
         get: async () => ({ data: { private: true } }),
-        listAttestations: async () => ({ data: { attestations: [{ bundle: signed.bundle }] } }),
+        listAttestations: async () => ({ data: { attestations: bundles.map((bundle) => ({ bundle })) } }),
       },
     },
   } as unknown as GitHub;
@@ -68,6 +68,23 @@ function provenance() {
 
 test('accepts a valid signed baseline from the expected workflow run', async () => {
   await provenance().verify(name, digest, run);
+});
+
+test('requires a certificate-backed in-toto attestation and can skip unrelated bundles', async () => {
+  const { dsseEnvelope, verificationMaterial, ...metadata } = signed.bundle;
+  const unrelated = [
+    { ...signed.bundle, dsseEnvelope: { ...dsseEnvelope, payloadType: 'application/json' } },
+    {
+      ...metadata,
+      dsseEnvelope,
+      verificationMaterial: {
+        publicKey: { hint: 'release-key' },
+        timestampVerificationData: verificationMaterial.timestampVerificationData,
+      },
+    },
+  ];
+  await assert.rejects(provenance(unrelated).verify(name, digest, run), /No attestation matched/);
+  await provenance([...unrelated, signed.bundle]).verify(name, digest, run);
 });
 
 test('rejects a genuine attestation from an older attempt of the same run', async () => {

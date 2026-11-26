@@ -32,6 +32,7 @@ export type Artifact = {
 };
 export type Names = { artifact: string; check: string; marker: string };
 
+/** Derives artifact names, check names, and the sticky-comment marker from one optional namespace. */
 export function names(input: string): Names {
   const scope = input ? slug(input) : '';
   return {
@@ -41,16 +42,19 @@ export function names(input: string): Names {
   };
 }
 
+/** Serializes JSON for storage in an artifact and caps its size before compression. */
 export function gz(data: unknown): Buffer {
   const buffer = Buffer.from(JSON.stringify(data));
   if (buffer.length > maxBytes) throw new Error('Coverage data exceeds the report size limit');
   return gzipSync(buffer);
 }
 
+/** Expands a gzip payload with the same byte limit used when writing coverage data. */
 function unz(data: Buffer): Buffer {
   return gunzipSync(data, { maxOutputLength: maxBytes });
 }
 
+/** Creates a unique artifact name while keeping its flag, run attempt, and optional shard discoverable. */
 export function uploadName(
   prefix: string,
   flag: string,
@@ -62,10 +66,12 @@ export function uploadName(
   return `${prefix}-upload-${slug(flag)}-${run}-${attempt}-${randomUUID()}${suffix}`;
 }
 
+/** Encodes normalized coverage together with the commit, flag, and optional shard that produced it. */
 export function uploadPayload(commit: string, flag: string, files: Files, shard?: string) {
   return gz({ schema, commit, flags: [flag], shard, files: serialize(files) });
 }
 
+/** Uploads the supplied entries as one Actions artifact and returns its ID and SHA-256 digest. */
 export async function putArtifact(
   name: string,
   contents: Map<string, Buffer | string>,
@@ -90,6 +96,7 @@ export async function putArtifact(
   }
 }
 
+/** Lists artifacts for a single workflow run, optionally by exact name, within the pagination budget. */
 export async function listArtifacts(
   api: GitHub,
   repo: Repo,
@@ -109,6 +116,7 @@ export async function listArtifacts(
   return artifacts;
 }
 
+/** Reads a download stream within the archive size limit, even when the server omits Content-Length. */
 async function boundedBody(response: Response): Promise<Buffer> {
   if (!response.ok || !response.body) throw new Error(`Artifact download failed (HTTP ${response.status})`);
   if (Number(response.headers.get('content-length')) > maxArchive)
@@ -138,6 +146,7 @@ function openZip(data: Buffer): Promise<ZipFile> {
   });
 }
 
+/** Reads a ZIP entry while enforcing the limit on its uncompressed data. */
 async function entryBytes(zip: ZipFile, entry: Entry): Promise<Buffer> {
   const stream = await zip.openReadStreamPromise(entry);
   const chunks: Buffer[] = [];
@@ -150,6 +159,7 @@ async function entryBytes(zip: ZipFile, entry: Entry): Promise<Buffer> {
   return Buffer.concat(chunks, size);
 }
 
+/** Reads only allowlisted ZIP entries and rejects unexpected or duplicate names. */
 export async function readZip(data: Buffer, allowed: string[]): Promise<Map<string, Buffer>> {
   const zip = await openZip(data);
   const files = new Map<string, Buffer>();
@@ -175,6 +185,7 @@ function requiredEntry(archive: Map<string, Buffer>, name: string): Buffer {
   return entry;
 }
 
+/** Verifies the downloaded ZIP against GitHub’s digest and keeps the token off redirected storage requests. */
 export async function downloadArtifact(repo: Repo, entry: Artifact, token: string) {
   if (entry.size_in_bytes > maxArchive) throw new Error('Artifact exceeds the download size limit');
   const base = process.env.GITHUB_API_URL ?? 'https://api.github.com';
@@ -201,6 +212,7 @@ export async function downloadArtifact(repo: Repo, entry: Artifact, token: strin
   return { bytes, digest };
 }
 
+/** Selects the newest upload for each shard, then verifies and merges the selected uploads by flag. */
 export async function loadUploads(
   api: GitHub,
   event: Event,
@@ -271,6 +283,7 @@ export async function loadUploads(
   return flags;
 }
 
+/** Decodes a baseline report after matching its metadata to the trusted push, workflow, and attempt. */
 export async function readBaseline(
   bytes: Buffer,
   commit: string,
@@ -302,12 +315,13 @@ export async function readBaseline(
   return flags;
 }
 
-// Uploaded by a trusted push run when GitHub refuses to sign its report for a
-// plan limit. Verification accepts an unsigned private baseline only with it.
+/** Names the companion artifact that records a trusted report’s attestation plan-limit response. */
+/** Names the companion artifact that records a trusted report’s attestation plan-limit response. */
 export function unattestedName(reportName: string) {
   return `${reportName}-unattested`;
 }
 
+/** Keeps the first attempt’s artifact name stable and gives each retry its own name. */
 export function reportArtifactName(namespace: Names, commit: string, attempt: number) {
   const base = `${namespace.artifact}-report-${commit}`;
   // Keep the first attempt immutable and give reruns their own report.

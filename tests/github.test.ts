@@ -92,17 +92,24 @@ test('rejects baseline runs from forks, PRs, other workflows, or incomplete atte
     assert.equal(trustedRun({ ...run, ...changed }, event, base, config), false);
   const policy = attestationPolicy(event, run, false);
   const pattern = policy.subjectAlternativeName as RegExp;
+  // The signer may be the caller itself or a reusable workflow it calls.
+  for (const signer of [
+    'https://github.com/hotdog-werx/mustard/.github/workflows/ci.yml@refs/heads/main',
+    'https://github.com/hotdog-werx/devkit/.github/workflows/__python_python-checks.yaml@refs/tags/v0',
+  ])
+    assert.equal(pattern.test(signer), true, signer);
+  for (const signer of [
+    'https://evil.example/hotdog-werx/mustard/.github/workflows/ci.yml@refs/heads/main',
+    'https://github.com/hotdog-werx/mustard/.github/workflows/ci.yml',
+    'https://github.com/hotdog-werx/mustard/blob/main/ci.yml@refs/heads/main',
+    'user@example.com',
+  ])
+    assert.equal(pattern.test(signer), false, signer);
+  // The trusted caller workflow is pinned exactly through the Build Config URI.
+  const buildConfig = policy.oids?.find((oid) => oid.oid?.id.at(-1) === 18);
   assert.equal(
-    pattern.test('https://github.com/hotdog-werx/mustard/.github/workflows/ci.yml@refs/heads/main'),
-    true,
-  );
-  assert.equal(
-    pattern.test('https://github.com/contributor/mustard/.github/workflows/ci.yml@refs/heads/main'),
-    false,
-  );
-  assert.equal(
-    pattern.test('https://github.com/hotdog-werx/mustard/.github/workflows/ciXyml@refs/heads/main'),
-    false,
+    buildConfig?.value.subarray(2).toString(),
+    'https://github.com/hotdog-werx/mustard/.github/workflows/ci.yml@refs/heads/main',
   );
   assert.equal(
     policy.oids?.some((oid) => oid.oid?.id.at(-1) === 13 && oid.value.includes(base)),
@@ -216,14 +223,14 @@ test('baseline lookup ignores a fork and verifies candidates in trusted runs', a
   }
 });
 
-test('baseline lookup falls back to the newest attempt that produced a report', async () => {
+test('baseline lookup falls back to a previous report or defaults a missing attempt to one', async (t) => {
   const bytes = fixture('report.zip');
   const digest = createHash('sha256').update(bytes).digest('hex');
-  const rerun = { ...run, run_attempt: 3 };
+  let candidate = run;
   const api = {
     rest: {
       actions: {
-        listWorkflowRunsForRepo: async () => ({ data: { workflow_runs: [rerun] } }),
+        listWorkflowRunsForRepo: async () => ({ data: { workflow_runs: [candidate] } }),
         listWorkflowRunArtifacts: () => {},
       },
       repos: { getBranch: async () => ({ data: { protected: true } }) },
@@ -251,15 +258,14 @@ test('baseline lookup falls back to the newest attempt that produced a report', 
       },
     },
   } as unknown as GitHub;
-  const fetchMock = mock.method(globalThis, 'fetch', async () => new Response(new Uint8Array(bytes)));
-  try {
+  const fetchMock = t.mock.method(globalThis, 'fetch', async () => new Response(new Uint8Array(bytes)));
+  for (const attempt of [3, undefined]) {
+    candidate = { ...run, run_attempt: attempt };
     const config = readConfig('baseline: {attestations: off, max_walk: 0}');
     const result = await findBaseline(api, event, base, 'example', config, names(''));
     assert.equal(result?.runId, 7);
-    assert.equal(fetchMock.mock.callCount(), 1);
-  } finally {
-    fetchMock.mock.restore();
   }
+  assert.equal(fetchMock.mock.callCount(), 2);
 });
 
 test('the sticky comment recognizes comments posted with a personal or app token', async () => {
@@ -623,6 +629,78 @@ test('preserves or replaces existing comments according to the repository policy
   }
   assert.equal(remove.mock.calls[0].arguments[0].comment_id, 42);
   assert.equal(create.mock.calls[0].arguments[0].issue_number, pull.number);
+});
+
+test('a passing patch with unchanged coverage skips failure-only and change-only comments', async () => {
+  const uploads = new Map([['default', deserialize({ 'src/example.ts': { lines: { 1: [1] } } })]]);
+  const list = mock.fn();
+  const api = { paginate: { iterator: list } } as unknown as GitHub;
+  for (const policy of ['require_changes', 'only_on_failure']) {
+    const config = readConfig(`comment: {${policy}: true}`);
+    const report = compute(uploads, new Map([['src/example.ts', { lines: new Set([1]) }]]), config, uploads);
+    await stickyComment(api, names(''), {
+      report,
+      config,
+      event,
+      configChanged: false,
+      hasUploads: true,
+      baseline: { sha: base, runId: 7, distance: 0 },
+    });
+  }
+  assert.equal(list.mock.callCount(), 0);
+});
+
+test('limits changed-file links and still shows coverage deltas for unmeasured patches', () => {
+  const config = readConfig('comment: {max_files: 2}');
+  const missed = [1, 2, ...Array.from({ length: 14 }, (_, index) => (index + 2) * 2)];
+  const current = new Map([
+    [
+      'default',
+      deserialize({
+        'src/missed.ts': { lines: Object.fromEntries(missed.map((line) => [line, [0]])) },
+        'src/changed.ts': { lines: { 1: [1] } },
+        'src/also-changed.ts': { lines: { 1: [1] } },
+      }),
+    ],
+  ]);
+  const previous = new Map([['default', deserialize({ 'src/changed.ts': { lines: { 1: [0] } } })]]);
+  const diff = new Map([
+    ['src/missed.ts', { lines: new Set(missed) }],
+    ['src/changed.ts', { lines: new Set([2]) }],
+    ['src/also-changed.ts', { lines: new Set([1]) }],
+  ]);
+  const report = compute(current, diff, config, previous);
+  const body = markdown({ report, config, event, configChanged: false, hasUploads: true });
+  assert.match(body, /\[1&#8211;2\]\([^\n]*#L1-L2\)/);
+  assert.match(body, /src\/missed\.ts[^\n]* … \|/);
+  assert.match(body, /src\/changed\.ts[^\n]* \| — \| ▲ \+100\.00 pp \| — \|/);
+  assert.match(body, /\+1 more file/);
+  assert.doesNotMatch(body, /also-changed\.ts/);
+});
+
+test('hides carried flags in the PR comment while keeping them in the job summary', () => {
+  const config = readConfig(`
+flags: {integration: {carryforward: true}, missing: {}}
+comment: {layout: flags, show_carryforward_flags: false}
+`);
+  const files = deserialize({ 'src/example.ts': { lines: { 1: [1] } } });
+  const report = compute(new Map([['unit', files]]), new Map(), config, new Map([['integration', files]]));
+  const display = {
+    report,
+    config,
+    event,
+    configChanged: false,
+    hasUploads: true,
+    baseline: { sha: base, runId: 7, distance: 0 },
+  };
+  const comment = markdown(display, true);
+  assert.doesNotMatch(comment, /\*\*Project \d/);
+  assert.match(comment, /\*\*unit\*\* · 100\.00%/);
+  assert.match(comment, /\*\*missing\*\* · missing/);
+  assert.doesNotMatch(comment, /\*\*integration\*\*/);
+  const summary = markdown(display);
+  assert.match(summary, /\*\*Project 100\.00%/);
+  assert.match(summary, /\*\*integration\*\* · 100\.00% · carried forward from a{12}/);
 });
 
 test('explains indirect coverage regressions separately from changed files', () => {

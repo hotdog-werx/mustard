@@ -4,6 +4,11 @@
 
 # Mustard
 
+[![CI](https://github.com/hotdog-werx/mustard/actions/workflows/ci-checks.yaml/badge.svg?branch=master)](https://github.com/hotdog-werx/mustard/actions/workflows/ci-checks.yaml)
+[![GitHub Release](https://img.shields.io/github/v/release/hotdog-werx/mustard)](https://github.com/hotdog-werx/mustard/releases/latest)
+[![GitHub Actions runtime: Node.js 24](https://img.shields.io/badge/Node.js-24-339933?logo=nodedotjs&logoColor=white)](action.yml)
+[![Coverage](https://raw.githubusercontent.com/hotdog-werx/mustard/mustard-badges/badge.svg)](https://github.com/hotdog-werx/mustard/actions/workflows/ci-checks.yaml?query=branch%3Amaster)
+
 **Every line covered.** Mustard is a GitHub Action for project and patch
 coverage gates. It keeps coverage in Actions artifacts and reports through
 checks, annotations, a step summary, and a sticky PR comment, using only the
@@ -33,7 +38,8 @@ Editors can validate the config with the [JSON Schema](mustard.schema.json).
 Use `mise trust` and `mise install` to install Node 24, the locked Devkit
 workspace provider, and the local npm dependencies. Run `mise run check` and
 `npm run build` before committing. The workflow runs Devkit's shared repository
-checks and checks that rebuilding reproduces the committed bundle.
+checks and checks that rebuilding reproduces the committed bundle. The linter
+enforces a cognitive complexity limit of 15 in `src/`.
 
 Run `mise run test-action` for the bundled action tests. CI also invokes the
 action with `uses: ./` and checks its outputs and step result in the runner. See

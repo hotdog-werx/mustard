@@ -288,6 +288,34 @@ test('report compares a PR to a push baseline and replaces an earlier upload for
   assert.match(reportArchive.get('meta.json')?.toString() ?? '', /"run_attempt":2/);
 });
 
+test('a push carries forward a missing flag from the first parent and records its origin', async (t) => {
+  const fixture = scenario(t);
+  const push = {
+    MUSTARD_TEST_EVENT: 'push',
+    MUSTARD_TEST_CONFIG_SUFFIX: '\nflags: {integration: {carryforward: true}}\n',
+  };
+  fixture.writeCoverage(fullCoverage);
+  ok(fixture.run({ mode: 'upload', files: 'lcov.info', flag: 'integration' }, push));
+  const first = ok(fixture.run({}, push));
+  assert.equal(first.outputs['baseline-sha'], '');
+
+  const next = { ...push, MUSTARD_TEST_NEXT_PUSH: 'true' };
+  fixture.writeCoverage(changedCoverage);
+  ok(fixture.run({ mode: 'upload', files: 'lcov.info', flag: 'unit' }, next));
+  const report = ok(fixture.run({}, next));
+  assert.equal(report.outputs['baseline-sha'], base);
+  assert.match(report.summary, /integration.*100\.00%.*carried forward from a{12}/);
+  assert.match(report.summary, /unit.*66\.66%/);
+  const archive = await fixture.inspect(Number(report.outputs['report-artifact-id']), [
+    'meta.json',
+    'report.json.gz',
+    'summary.json',
+  ]);
+  assert.deepEqual(JSON.parse(archive.get('meta.json')?.toString() ?? '{}').carryforward, {
+    integration: base,
+  });
+});
+
 test('publishes the patch verdict and PR comment when GitHub cannot append annotations', (t) => {
   const fixture = scenario(t);
   const lines = Array.from({ length: 75 }, (_, index) => index + 1);
@@ -327,7 +355,10 @@ test('fork report emits outputs without writes and comment recomputes with trust
   assert.equal(ok(fixture.run({}, fork)).outputs['patch-status'], 'failure');
   assert.equal(checks(fixture.state()).length, 0);
   const comment = ok(
-    fixture.run({ mode: 'comment', 'config-source': 'head' }, { MUSTARD_TEST_EVENT: 'workflow_run' }),
+    fixture.run(
+      { mode: 'comment', 'config-source': 'head', 'run-id': '7' },
+      { MUSTARD_TEST_EVENT: 'workflow_run' },
+    ),
   );
   assert.match(comment.summary, /merge-base configuration/);
   assert.equal(comment.outputs['patch-status'], 'failure');
@@ -335,6 +366,66 @@ test('fork report emits outputs without writes and comment recomputes with trust
     fixture.state().calls.some((call) => call.route === '/issues/5/comments' && call.method === 'POST'),
   );
   assert.equal(checks(fixture.state()).length, 2);
+});
+
+test('comment mode refuses a pull_request event or a run ID different from the triggering run', (t) => {
+  const fixture = scenario(t);
+  const wrongEvent = fixture.run({ mode: 'comment' });
+  assert.equal(wrongEvent.status, 1, wrongEvent.diagnostics);
+  assert.match(wrongEvent.stdout, /comment mode requires a completed workflow_run event/);
+  const wrongRun = fixture.run({ mode: 'comment', 'run-id': '6' }, { MUSTARD_TEST_EVENT: 'workflow_run' });
+  assert.equal(wrongRun.status, 1, wrongRun.diagnostics);
+  assert.match(wrongRun.stdout, /run-id must match the triggering workflow_run/);
+  assert.deepEqual(fixture.state().calls, []);
+});
+
+test('a fork PR closed before the privileged job starts receives no report or checks', (t) => {
+  const fixture = scenario(t);
+  const result = ok(
+    fixture.run(
+      { mode: 'comment' },
+      { MUSTARD_TEST_EVENT: 'workflow_run', MUSTARD_TEST_FORK_CLOSED: 'true' },
+    ),
+  );
+  assert.match(result.stdout, /No matching open fork PR/);
+  assert.deepEqual(result.outputs, {});
+  assert.equal(
+    fixture.state().calls.some(({ method }) => method !== 'GET'),
+    false,
+  );
+});
+
+test('comment mode ignores push runs and runs already back in progress', (t) => {
+  const fixture = scenario(t);
+  const triggers: Record<string, string>[] = [
+    { MUSTARD_TEST_TRIGGER_EVENT: 'push' },
+    { MUSTARD_TEST_TRIGGER_STATUS: 'in_progress' },
+  ];
+  for (const trigger of triggers) {
+    const report = ok(fixture.run({ mode: 'comment' }, { MUSTARD_TEST_EVENT: 'workflow_run', ...trigger }));
+    assert.match(report.stdout, /No matching open fork PR/);
+    assert.deepEqual(report.outputs, {});
+  }
+  assert.deepEqual(
+    fixture.state().calls.map(({ method, route }) => [method, route]),
+    [
+      ['GET', '/actions/runs/7'],
+      ['GET', '/actions/runs/7'],
+    ],
+  );
+});
+
+test('comment mode accepts the first upload when both run records omit the attempt', (t) => {
+  const fixture = scenario(t);
+  fixture.writeCoverage(fullCoverage);
+  ok(fixture.run({ mode: 'upload' }, { MUSTARD_TEST_FORK: 'true', MUSTARD_TEST_ATTEMPT: '1' }));
+  const report = ok(
+    fixture.run({ mode: 'comment' }, { MUSTARD_TEST_EVENT: 'workflow_run', MUSTARD_TEST_LEGACY_RUN: 'true' }),
+  );
+  assert.equal(report.outputs['patch-status'], 'success');
+  assert.ok(
+    fixture.state().calls.some(({ method, route }) => method === 'POST' && route === '/issues/5/comments'),
+  );
 });
 
 test('fail-ci propagates a failed patch to the runner', (t) => {
@@ -390,7 +481,7 @@ test('rejects an artifact digest mismatch before publishing any checks', (t) => 
 test('publishes the HTML report with escaped source and missed lines marked', async (t) => {
   const fixture = scenario(t);
   fixture.writeCoverage(changedCoverage);
-  fixture.writeSource('one\n<script>uncovered</script>\nthree\n');
+  fixture.writeSource('one\n<script>uncovered</script>\nthree\n// unmeasured comment\n');
   ok(fixture.run({ mode: 'upload', files: 'lcov.info' }));
   const report = ok(fixture.run({}, { MUSTARD_TEST_CONFIG_SUFFIX: 'html: {enabled: true}\n' }));
   const artifact = fixture.state().archives.find(({ name }) => name.startsWith('mustard-html-'));
@@ -398,7 +489,27 @@ test('publishes the HTML report with escaped source and missed lines marked', as
   const html = (await fixture.inspect(artifact.id, ['index.html'])).get('index.html')?.toString();
   assert.ok(html);
   assert.ok(html.includes('class="miss">2  &lt;script&gt;uncovered&lt;/script&gt;'));
+  assert.ok(html.includes('class="">4  // unmeasured comment'));
   assert.match(report.summary, new RegExp(`HTML report.*artifacts/${artifact.id}`));
+});
+
+test('keeps an HTML artifact usable when escaped source exceeds the rendering budget', async (t) => {
+  const fixture = scenario(t);
+  const generated = '&'.repeat(49_000);
+  const files = Array.from({ length: 56 }, (_, index) => `src/generated-${index}.ts`);
+  for (const file of files) writeFileSync(join(fixture.directory, file), generated);
+  fixture.writeCoverage(files.map((file) => `SF:${file}\nDA:1,1\nend_of_record\n`).join(''));
+  ok(fixture.run({ mode: 'upload' }));
+  const result = ok(fixture.run({}, { MUSTARD_TEST_CONFIG_SUFFIX: 'html: {enabled: true}\n' }));
+  assert.equal(result.outputs['project-coverage'], '100.00%');
+  const artifact = fixture.state().archives.find(({ name }) => name.startsWith('mustard-html-'));
+  assert.ok(artifact);
+  const html = (await fixture.inspect(artifact.id, ['index.html'])).get('index.html')?.toString();
+  assert.ok(html);
+  assert.ok(html.includes('src/generated-0.ts'));
+  assert.ok(!html.includes('src/generated-55.ts'));
+  assert.ok(html.includes('the report reached its size limit'));
+  assert.ok(html.endsWith('</main></html>'));
 });
 
 test('fork HTML reports show line status without including checkout source', async (t) => {
@@ -462,6 +573,27 @@ component_management:
     ref: 'refs/heads/mustard-badges',
     sha: 'badge-commit',
   });
+});
+
+test('a named coverage report uses its own badge branch', (t) => {
+  const fixture = scenario(t);
+  const push = { MUSTARD_TEST_EVENT: 'push', MUSTARD_TEST_CONFIG_SUFFIX: '\nbadge: {enabled: true}\n' };
+  fixture.writeCoverage(fullCoverage);
+  ok(fixture.run({ name: 'api', mode: 'upload', files: 'lcov.info' }, push));
+  ok(fixture.run({ name: 'api' }, push));
+  const { calls } = fixture.state();
+  assert.deepEqual(calls.find(({ route }) => route === '/git/refs')?.body, {
+    ref: 'refs/heads/mustard-badges-3-api',
+    sha: 'badge-commit',
+  });
+  assert.equal(
+    calls.find(({ route }) => route === '/git/commits')?.body?.message,
+    'Publish Mustard coverage badges for mustard[api]',
+  );
+  assert.equal(
+    calls.some(({ route }) => route === '/branches/mustard-badges'),
+    false,
+  );
 });
 
 test('publishes a timestamped attestation for the exact push report digest', (t) => {
@@ -559,6 +691,17 @@ test('same-repository PRs use base policy unless the caller opts into head polic
       assert.equal(report.outputs['patch-status'], '');
     }
   }
+});
+
+test('a failed head config comparison still publishes the verdict from trusted policy', (t) => {
+  const fixture = scenario(t);
+  fixture.writeCoverage(changedCoverage);
+  ok(fixture.run({ mode: 'upload', files: 'lcov.info' }));
+  const result = ok(fixture.run({}, { MUSTARD_TEST_HEAD_CONFIG_UNAVAILABLE: 'true' }));
+  assert.match(result.stdout, /Could not compare the PR configuration with the trusted configuration/);
+  assert.equal(result.outputs['patch-status'], 'failure');
+  assert.doesNotMatch(result.summary, /This PR changes coverage configuration/);
+  assert.equal(checks(fixture.state()).length, 2);
 });
 
 test('reads Codecov settings as a fallback when the repository has no Mustard config', (t) => {

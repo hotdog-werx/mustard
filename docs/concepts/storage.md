@@ -50,9 +50,11 @@ and attempt. A push that carries coverage forward starts with the previous
 first-parent commit.
 
 Mustard verifies the artifact digest before reading its contents. In the
-attested path it also verifies the signed subject, repository and workflow
-identity, commit and ref, run attempt, and runner environment. By default
-attested baselines require GitHub-hosted runners. Set
+attested path it also verifies the signed subject, repository, calling workflow,
+commit and ref, run attempt, and runner environment. The report job may run
+inside a reusable workflow, such as a shared CI template: Mustard pins the
+workflow that triggered the run, not the reusable workflow file that signed. By
+default attested baselines require GitHub-hosted runners. Set
 `baseline.allow_self_hosted: true` only for runners you trust.
 
 Public attestations use Sigstore transparency logs. Private attestations use

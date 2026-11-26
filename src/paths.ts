@@ -17,6 +17,7 @@ function strip(path: string, prefix: string): string {
   return matches ? path.slice(prefix.length + 1) : path;
 }
 
+/** Checks lexical path containment using the host’s path rules. */
 export function within(root: string, path: string): boolean {
   const rel = relative(root, path);
   return (
@@ -24,6 +25,7 @@ export function within(root: string, path: string): boolean {
   );
 }
 
+/** Applies configured prefix rewrites and removes the coverage root or checkout path. */
 export function normalizePath(raw: string, workspace: string, root: string, fixes: Fix[]): string {
   let path = posix(raw);
   for (const [from, to] of fixes) {
@@ -36,6 +38,7 @@ export function normalizePath(raw: string, workspace: string, root: string, fixe
   return posix(path);
 }
 
+/** Accepts only regular files whose real paths remain within the checkout. */
 export function existsIn(workspace: string, path: string): boolean {
   if (!safePath(path)) return false;
   const absolute = resolve(workspace, path);

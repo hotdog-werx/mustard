@@ -10,3 +10,5 @@ coverage:
     patch:
       default:
         target: 100%
+badge:
+  enabled: true

@@ -150223,6 +150223,17 @@ function assertBudget(views) {
 function serialize(files) {
   return Object.fromEntries([...files].map(([path4, lines]) => [path4, { lines: Object.fromEntries(lines) }]));
 }
+function deserializeLine(number, tuple) {
+  if (!Array.isArray(tuple) || ![1, 3].includes(tuple.length) || tuple.some((value) => typeof value !== "number"))
+    throw new Error("Invalid normalized line data");
+  const line = integer(number, 1, 2147483647);
+  if (String(line) !== number) throw new Error("Noncanonical line number");
+  const hits = integer(tuple[0]);
+  if (tuple.length === 1) return [line, [hits]];
+  const total = integer(tuple[2]);
+  const covered = integer(tuple[1], 0, total);
+  return [line, total ? [hits, covered, total] : [hits]];
+}
 function deserialize(value) {
   const files = /* @__PURE__ */ new Map();
   let count = 0;
@@ -150230,14 +150241,9 @@ function deserialize(value) {
     if (!safePath(path4) || files.size >= maxFiles) throw new Error("Invalid coverage path or too many files");
     const lines = /* @__PURE__ */ new Map();
     for (const [number, tuple] of Object.entries(record(record(item).lines))) {
-      if (++count > maxLines || !Array.isArray(tuple) || ![1, 3].includes(tuple.length) || tuple.some((value2) => typeof value2 !== "number"))
-        throw new Error("Invalid normalized line data");
-      const line = integer(number, 1, 2147483647);
-      if (String(line) !== number) throw new Error("Noncanonical line number");
-      const hits = integer(tuple[0]);
-      const total = tuple.length === 3 ? integer(tuple[2]) : 0;
-      const covered = tuple.length === 3 ? integer(tuple[1], 0, total) : 0;
-      lines.set(line, total ? [hits, covered, total] : [hits]);
+      if (++count > maxLines) throw new Error("Invalid normalized line data");
+      const [line, coverage] = deserializeLine(number, tuple);
+      lines.set(line, coverage);
     }
     files.set(path4, lines);
   }
@@ -152299,11 +152305,12 @@ function warnKeys(value, warn, path4 = "", pattern = "") {
   if (!known && !wildcard) return;
   for (const [key, child] of Object.entries(value)) {
     const next = path4 ? `${path4}.${key}` : key;
-    if (known && !known.includes(key)) warn(`Ignoring unsupported config key ${JSON.stringify(next)}`);
-    else {
-      const segment = wildcard ? "*" : key;
-      warnKeys(child, warn, next, pattern ? `${pattern}.${segment}` : segment);
+    if (known && !known.includes(key)) {
+      warn(`Ignoring unsupported config key ${JSON.stringify(next)}`);
+      continue;
     }
+    const segment = wildcard ? "*" : key;
+    warnKeys(child, warn, next, pattern ? `${pattern}.${segment}` : segment);
   }
 }
 function readConfig(text = "", warn = () => {
@@ -152404,42 +152411,44 @@ async function resolvePull(api, repo, run) {
     throw new Error("Several open PRs match the triggering run. Mustard cannot select one safely.");
   return matched[0];
 }
+async function getCommentEvent(api, repo, defaultBranch, workflowInput) {
+  const { payload } = context2;
+  if (context2.eventName !== "workflow_run" || payload.action !== "completed") {
+    throw new Error("comment mode requires a completed workflow_run event");
+  }
+  const id = Number(payload.workflow_run?.id);
+  const override = getInput("run-id");
+  if (!Number.isSafeInteger(id) || id <= 0 || override && override !== String(id)) {
+    throw new Error("run-id must match the triggering workflow_run");
+  }
+  const { data: run } = await api.rest.actions.getWorkflowRun({ ...repo, run_id: id });
+  const payloadRun = payload.workflow_run;
+  if (run.event !== "pull_request" || run.status !== "completed") return;
+  if (run.head_sha !== payloadRun?.head_sha || run.run_attempt !== payloadRun?.run_attempt) return;
+  const pull = await resolvePull(api, repo, run);
+  if (!pull || pull.head.repo?.full_name.toLowerCase() === repository(repo).toLowerCase()) return;
+  const commit = sha(pull.head.sha);
+  return {
+    mode: "comment",
+    runId: id,
+    attempt: run.run_attempt ?? 1,
+    event: run.event,
+    commit,
+    coverageCommit: commit,
+    pull,
+    fork: true,
+    workflow: workflowPath(workflowInput || run.path),
+    base: sha(pull.base.sha),
+    defaultBranch,
+    repo
+  };
+}
 async function getEvent(api, mode) {
   const repo = context2.repo;
   const payload = context2.payload;
   const defaultBranch = typeof payload.repository?.default_branch === "string" ? payload.repository.default_branch : (await api.rest.repos.get(repo)).data.default_branch;
   const workflowInput = getInput("workflow");
-  if (mode === "comment") {
-    if (context2.eventName !== "workflow_run" || payload.action !== "completed") {
-      throw new Error("comment mode requires a completed workflow_run event");
-    }
-    const id = Number(payload.workflow_run?.id);
-    const override = getInput("run-id");
-    if (!Number.isSafeInteger(id) || id <= 0 || override && override !== String(id)) {
-      throw new Error("run-id must match the triggering workflow_run");
-    }
-    const { data: run } = await api.rest.actions.getWorkflowRun({ ...repo, run_id: id });
-    const payloadRun = payload.workflow_run;
-    if (run.event !== "pull_request" || run.status !== "completed") return;
-    if (run.head_sha !== payloadRun?.head_sha || run.run_attempt !== payloadRun?.run_attempt) return;
-    const pull2 = await resolvePull(api, repo, run);
-    if (!pull2 || pull2.head.repo?.full_name.toLowerCase() === repository(repo).toLowerCase()) return;
-    const commit2 = sha(pull2.head.sha);
-    return {
-      mode,
-      runId: id,
-      attempt: run.run_attempt ?? 1,
-      event: run.event,
-      commit: commit2,
-      coverageCommit: commit2,
-      pull: pull2,
-      fork: true,
-      workflow: workflowPath(workflowInput || run.path),
-      base: sha(pull2.base.sha),
-      defaultBranch,
-      repo
-    };
-  }
+  if (mode === "comment") return getCommentEvent(api, repo, defaultBranch, workflowInput);
   if (!["pull_request", "push", "merge_group"].includes(context2.eventName)) {
     throw new Error("report mode supports pull_request, push, and merge_group; use comment for workflow_run");
   }
@@ -152739,12 +152748,19 @@ function oid(number, text) {
   };
 }
 function attestationPolicy(event, run, allowSelfHosted, attempt = run.run_attempt ?? 1) {
-  const source = `${process.env.GITHUB_SERVER_URL ?? "https://github.com"}/${repository(event.repo)}`;
+  const server = process.env.GITHUB_SERVER_URL ?? "https://github.com";
+  const source = `${server}/${repository(event.repo)}`;
   const ref = `refs/heads/${run.head_branch}`;
   const workflow = `${source}/${run.path}@${ref}`;
-  const exact = workflow.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedServer = server.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return {
-    subjectAlternativeName: new RegExp(`^${exact}$`),
+    // The certificate SAN names the workflow file that ran the signing job. A
+    // job inside a reusable workflow (for example a shared CI template) has
+    // that reusable workflow as its SAN, possibly from another repository.
+    // Accept any workflow identity there and pin the trusted caller through
+    // the Build Config URI (OID 18) together with the repository, commit, ref,
+    // trigger, and exact run attempt below.
+    subjectAlternativeName: new RegExp(`^${escapedServer}/[^/]+/[^/]+/\\.github/workflows/[^/@]+@.+$`),
     extensions: { issuer },
     oids: [
       oid(12, source),
@@ -152809,6 +152825,7 @@ var Provenance = class {
       "Artifact attestations are unavailable on this repository plan. Using workflow and artifact provenance."
     );
   }
+  /** Checks signatures and report identity, applying the configured fallback only when eligible. */
   async verify(name, digest, run, attempt = run.run_attempt ?? 1, unattested = false) {
     if (this.config.baseline.attestations === "off" || this.unavailable) return;
     const auto = this.config.baseline.attestations === "auto";
@@ -152835,24 +152852,43 @@ var Provenance = class {
     this.verifier ??= this.isPublic().then((isPublic) => createVerifier(!isPublic));
     const verifier = await this.verifier;
     const policy = attestationPolicy(this.event, run, this.config.baseline.selfHosted, attempt);
-    for (const entry of entries) {
-      try {
-        const bundle = (0, import_bundle2.bundleFromJSON)(record(entry).bundle);
-        if (bundle.content.$case !== "dsseEnvelope" || bundle.content.dsseEnvelope.payloadType !== "application/vnd.in-toto+json")
-          continue;
-        const entity = (0, import_verify5.toSignedEntity)(bundle);
-        if (entity.key.$case !== "certificate") continue;
-        verifier.verify(entity, policy);
-        assertSubject(bundle.content.dsseEnvelope.payload, name, digest);
-        return;
-      } catch {
-      }
-    }
+    if (entries.some((entry) => matchesAttestation(entry, verifier, policy, name, digest))) return;
     throw new Error("No attestation matched the trusted workflow, run, commit, runner, and artifact");
   }
 };
+function matchesAttestation(entry, verifier, policy, name, digest) {
+  try {
+    const bundle = (0, import_bundle2.bundleFromJSON)(record(entry).bundle);
+    if (bundle.content.$case !== "dsseEnvelope" || bundle.content.dsseEnvelope.payloadType !== "application/vnd.in-toto+json")
+      return false;
+    const entity = (0, import_verify5.toSignedEntity)(bundle);
+    if (entity.key.$case !== "certificate") return false;
+    verifier.verify(entity, policy);
+    assertSubject(bundle.content.dsseEnvelope.payload, name, digest);
+    return true;
+  } catch {
+    return false;
+  }
+}
 async function findBaseline(api, event, start, token, config, namespace) {
   const provenance = new Provenance(api, event, config);
+  async function baselineFromRun(run, commit2) {
+    try {
+      if (!run.head_branch || !await protectedBranch(api, event, run.head_branch)) return;
+      const artifacts = await listArtifacts(api, event.repo, run.id);
+      for (let attempt = run.run_attempt ?? 1; attempt >= 1; attempt--) {
+        const name = reportArtifactName(namespace, commit2, attempt);
+        const artifact = artifacts.find((entry) => entry.name === name && !entry.expired);
+        if (!artifact) continue;
+        const { bytes, digest } = await downloadArtifact(event.repo, artifact, token);
+        const unattested = artifacts.some((entry) => entry.name === unattestedName(name) && !entry.expired);
+        await provenance.verify(name, digest, run, attempt, unattested);
+        return await readBaseline(bytes, commit2, run.id, attempt, run.path);
+      }
+    } catch (error2) {
+      warning(`Rejected coverage baseline from run ${run.id}: ${String(error2)}`);
+    }
+  }
   let commit = start;
   for (let distance = 0; distance <= config.baseline.maxWalk; distance++) {
     const { data } = await api.rest.actions.listWorkflowRunsForRepo({
@@ -152866,24 +152902,8 @@ async function findBaseline(api, event, start, token, config, namespace) {
       (a, b) => (b.run_attempt ?? 1) - (a.run_attempt ?? 1) || b.updated_at.localeCompare(a.updated_at)
     );
     for (const run of runs) {
-      try {
-        if (!run.head_branch || !await protectedBranch(api, event, run.head_branch)) continue;
-        const artifacts = await listArtifacts(api, event.repo, run.id);
-        for (let attempt = run.run_attempt ?? 1; attempt >= 1; attempt--) {
-          const name = reportArtifactName(namespace, commit, attempt);
-          const artifact = artifacts.find((entry) => entry.name === name && !entry.expired);
-          if (!artifact) continue;
-          const { bytes, digest } = await downloadArtifact(event.repo, artifact, token);
-          const unattested = artifacts.some((entry) => entry.name === unattestedName(name) && !entry.expired);
-          await provenance.verify(name, digest, run, attempt, unattested);
-          const flags = await readBaseline(bytes, commit, run.id, attempt, run.path);
-          return { sha: commit, runId: run.id, distance, flags };
-        }
-      } catch (error2) {
-        warning(
-          `Rejected coverage baseline from run ${run.id}: ${error2 instanceof Error ? error2.message : "verification error"}`
-        );
-      }
+      const baseline = await baselineFromRun(run, commit);
+      if (baseline) return { sha: commit, runId: run.id, distance, flags: baseline };
     }
     if (distance === config.baseline.maxWalk) break;
     const { data: revision } = await api.rest.repos.getCommit({ ...event.repo, ref: commit, per_page: 1 });
@@ -153078,6 +153098,10 @@ function patchFiles(files, diff) {
   }
   return result;
 }
+function minimumCoverage(rule, kind, baseline) {
+  const target = rule.target !== "auto" ? rule.target : kind === "project" && baseline ? totals(baseline).percent : 100;
+  return Math.max(0, target - rule.threshold);
+}
 function check(rule, measured, baseline, config, kind, hasUploads, completeDiff) {
   const make = (conclusion, message2) => ({
     name: rule.name,
@@ -153093,8 +153117,7 @@ function check(rule, measured, baseline, config, kind, hasUploads, completeDiff)
   if (rule.target === "auto" && !baseline && kind === "project") {
     return make(config.baseline.required ? "failure" : rule.noBaseline, "No baseline available.");
   }
-  const target = rule.target !== "auto" ? rule.target : kind === "project" && baseline ? totals(baseline).percent : 100;
-  const minimum = Math.max(0, target - rule.threshold);
+  const minimum = minimumCoverage(rule, kind, baseline);
   return make(
     actual.percent >= minimum ? "success" : "failure",
     `${formatPercent(actual.percent, config)} coverage, minimum ${formatPercent(minimum, config)}.`
@@ -153107,37 +153130,34 @@ function formatPercent(value, config) {
   const stabilized = Math.abs(scaled - Math.round(scaled)) < 1e-8 ? Math.round(scaled) : scaled;
   return `${(round(stabilized) / scale).toFixed(config.precision)}%`;
 }
-function compute(uploads, diff, config, baseline, completeDiff = true, hasPatch = true) {
+function prepareFlags(uploads, baseline, config) {
   const ignored = matches(config.ignore, false);
-  const filter = (files2, paths) => new Map([...view(files2, paths)].filter(([path4]) => !ignored(path4)));
+  const filter = (files, paths) => new Map([...view(files, paths)].filter(([path4]) => !ignored(path4)));
   const flags = /* @__PURE__ */ new Map();
   const baselineFlags = /* @__PURE__ */ new Map();
   const carried = [];
   const missing = [];
-  for (const [name, files2] of uploads) flags.set(name, filter(files2, config.flags.get(name)?.paths ?? []));
-  for (const [name, files2] of baseline ?? [])
-    baselineFlags.set(name, filter(files2, config.flags.get(name)?.paths ?? []));
-  const expected = new Set(config.flags.keys());
-  if (config.defaultCarryforward) {
-    for (const name of baselineFlags.keys()) expected.add(name);
-  }
+  for (const [name, files] of uploads) flags.set(name, filter(files, config.flags.get(name)?.paths ?? []));
+  for (const [name, files] of baseline ?? [])
+    baselineFlags.set(name, filter(files, config.flags.get(name)?.paths ?? []));
+  const expected = /* @__PURE__ */ new Set([
+    ...config.flags.keys(),
+    ...config.defaultCarryforward ? baselineFlags.keys() : []
+  ]);
   for (const name of expected) {
     if (flags.has(name)) continue;
     const carryforward = config.flags.get(name)?.carryforward ?? config.defaultCarryforward;
-    const previous2 = baselineFlags.get(name);
-    if (carryforward && previous2) {
-      flags.set(name, previous2);
+    const previous = baselineFlags.get(name);
+    if (carryforward && previous) {
+      flags.set(name, previous);
       carried.push(name);
     } else missing.push(name);
   }
   assertBudget(flags.values());
-  const files = union(flags);
-  const previous = baseline ? union(baselineFlags) : void 0;
-  const patch = patchFiles(files, diff);
-  const project = totals(files);
-  const oldProject = previous ? totals(previous) : void 0;
-  const delta = oldProject ? project.percent - oldProject.percent : void 0;
-  const changed = [...diff].map(([path4, change]) => {
+  return { flags, baselineFlags, carried, missing };
+}
+function changedFiles(diff, files, patch, previous) {
+  return [...diff].map(([path4, change]) => {
     const current = files.get(path4);
     const before = previous?.get(change.oldPath ?? path4);
     const currentPatch = patch.get(path4);
@@ -153148,6 +153168,8 @@ function compute(uploads, diff, config, baseline, completeDiff = true, hasPatch 
       uncovered: currentPatch ? [...currentPatch].filter(([, line]) => status(line) !== "hit").map(([n]) => n).sort((a, b) => a - b) : []
     };
   }).filter((row) => row.patch || row.delta !== void 0);
+}
+function indirectChanges(diff, files, previous) {
   const indirect = [];
   const renamed = new Set([...diff.values()].map((value) => value.oldPath));
   if (previous) {
@@ -153158,24 +153180,32 @@ function compute(uploads, diff, config, baseline, completeDiff = true, hasPatch 
       if (change !== 0) indirect.push({ path: path4, delta: change });
     }
   }
+  return indirect;
+}
+function coverageChecks(flags, baselineFlags, diff, config, {
+  hasUploads,
+  completeDiff,
+  hasPatch,
+  hasIndirectChanges
+}) {
   const evaluate = (rule, kind, componentPaths = []) => {
     const selection = view(view(union(flags, rule.flags), rule.paths), componentPaths);
-    const prior = baseline ? view(view(union(baselineFlags, rule.flags), rule.paths), componentPaths) : void 0;
-    const hasUploads = rule.flags.length ? rule.flags.some((name) => flags.has(name)) && uploads.size > 0 : uploads.size > 0;
+    const prior = baselineFlags ? view(view(union(baselineFlags, rule.flags), rule.paths), componentPaths) : void 0;
+    const hasSelectedUploads = hasUploads && (!rule.flags.length || rule.flags.some((name) => flags.has(name)));
     return check(
       rule,
       kind === "patch" ? patchFiles(selection, diff) : selection,
       prior,
       config,
       kind,
-      hasUploads,
+      hasSelectedUploads,
       completeDiff
     );
   };
   const projectChecks = config.project.map((rule) => evaluate(rule, "project"));
   const primary = projectChecks.find((result) => result.name === "project");
   const defaultRule = config.project.find((rule) => rule.name === "project");
-  if (config.indirectFail && primary && indirect.length && uploads.size) {
+  if (config.indirectFail && primary && hasIndirectChanges && hasUploads) {
     primary.conclusion = defaultRule?.informational ? "neutral" : "failure";
     primary.message += " Coverage changed in files outside the diff.";
   }
@@ -153184,24 +153214,46 @@ function compute(uploads, diff, config, baseline, completeDiff = true, hasPatch 
   const componentChecks = config.components.flatMap(
     (component) => component.gates.filter((rule) => hasPatch || rule.type !== "patch").map((rule) => evaluate(rule, rule.type, component.paths))
   );
-  const patchTotal = totals(patch);
-  const patchGate = patchChecks.find((result) => result.name === "patch");
+  return [...projectChecks, ...patchChecks, ...flagChecks, ...componentChecks];
+}
+function annotatePatch(patch, patchGate, maximum) {
   const annotations = [];
-  if (config.annotations.enabled && patchGate) {
-    for (const [path4, lines] of patch) {
-      for (const [number, line] of lines) {
-        const kind = status(line);
-        if (kind === "hit" || annotations.length >= config.annotations.max) continue;
-        annotations.push({
-          path: path4,
-          start_line: number,
-          end_line: number,
-          annotation_level: patchGate.conclusion === "failure" ? "failure" : "warning",
-          message: kind === "partial" ? "Changed line has incomplete branch coverage." : "Changed line is uncovered."
-        });
-      }
+  if (!patchGate) return annotations;
+  const annotation_level = patchGate.conclusion === "failure" ? "failure" : "warning";
+  for (const [path4, lines] of patch) {
+    for (const [number, line] of lines) {
+      const kind = status(line);
+      if (kind === "hit" || annotations.length >= maximum) continue;
+      annotations.push({
+        path: path4,
+        start_line: number,
+        end_line: number,
+        annotation_level,
+        message: kind === "partial" ? "Changed line has incomplete branch coverage." : "Changed line is uncovered."
+      });
     }
   }
+  return annotations;
+}
+function compute(uploads, diff, config, baseline, completeDiff = true, hasPatch = true) {
+  const { flags, baselineFlags, carried, missing } = prepareFlags(uploads, baseline, config);
+  const files = union(flags);
+  const previous = baseline ? union(baselineFlags) : void 0;
+  const patch = patchFiles(files, diff);
+  const project = totals(files);
+  const oldProject = previous ? totals(previous) : void 0;
+  const delta = oldProject ? project.percent - oldProject.percent : void 0;
+  const changed = changedFiles(diff, files, patch, previous);
+  const indirect = indirectChanges(diff, files, previous);
+  const checks = coverageChecks(flags, baseline ? baselineFlags : void 0, diff, config, {
+    hasUploads: uploads.size > 0,
+    completeDiff,
+    hasPatch,
+    hasIndirectChanges: indirect.length > 0
+  });
+  const patchTotal = totals(patch);
+  const patchGate = config.annotations.enabled ? checks.find((result) => result.name === "patch") : void 0;
+  const annotations = annotatePatch(patch, patchGate, config.annotations.max);
   return {
     files,
     flags,
@@ -153213,8 +153265,8 @@ function compute(uploads, diff, config, baseline, completeDiff = true, hasPatch 
     changed,
     indirect,
     annotations,
-    omittedAnnotations: config.annotations.enabled && patchGate ? patchTotal.total - patchTotal.hit - annotations.length : 0,
-    checks: [...projectChecks, ...patchChecks, ...flagChecks, ...componentChecks],
+    omittedAnnotations: patchGate ? patchTotal.total - patchTotal.hit - annotations.length : 0,
+    checks,
     flagTotals: new Map([...flags].map(([name, data]) => [name, totals(data)])),
     componentTotals: new Map(
       config.components.map((component) => [
@@ -153263,31 +153315,17 @@ function ranges(numbers) {
   }
   return groups;
 }
-function markdown({
-  report,
-  config,
-  event,
-  baseline,
-  configChanged,
-  htmlId,
-  reportId,
-  outputRunId,
-  hasUploads,
-  completeDiff = true
-}, comment = false) {
-  const percent2 = (value) => formatPercent(value, config);
-  const delta = (value) => value === void 0 ? "\u2014" : `${value > 0 ? "\u25B2 +" : value < 0 ? "\u25BC \u2212" : ""}${percent2(Math.abs(value)).replace("%", " pp")}`;
-  const layout = config.comment.layout;
-  const include2 = (...keys) => !comment || !layout || keys.some((key) => layout.has(key));
+function markdownPatch(patch, completeDiff, percent2) {
+  if (!completeDiff) return "The complete patch was unavailable.";
+  if (!patch.total) return "No coverable lines changed.";
+  return `**Patch ${percent2(patch.percent)}** \xB7 ${patch.hit}/${patch.total} fully covered`;
+}
+function markdownHeader({ report, event, baseline, configChanged, hasUploads, completeDiff = true }, showTotals, percent2, delta) {
   const sections = ["## Mustard coverage"];
   if (!hasUploads) sections.push("No coverage uploads found for this attempt.");
-  if (hasUploads && include2("header", "reach", "diff")) {
+  if (hasUploads && showTotals) {
     sections.push(`**Project ${percent2(report.project.percent)}** \xB7 ${delta(report.delta)}`);
-    if (event.base) {
-      sections.push(
-        !completeDiff ? "The complete patch was unavailable." : report.patch.total ? `**Patch ${percent2(report.patch.percent)}** \xB7 ${report.patch.hit}/${report.patch.total} fully covered` : "No coverable lines changed."
-      );
-    }
+    if (event.base) sections.push(markdownPatch(report.patch, completeDiff, percent2));
   }
   if (baseline) {
     sections.push(
@@ -153297,29 +153335,49 @@ function markdown({
   if (event.fork) sections.push("Coverage for this fork was generated by the PR code.");
   if (configChanged)
     sections.push("This PR changes coverage configuration. The checks use the merge-base configuration.");
+  return sections;
+}
+function markdownChangedFiles({ report, config, event }, percent2, delta) {
+  const rows = report.changed.slice(0, config.comment.maxFiles).map((row) => {
+    const groups = ranges(row.uncovered.slice(0, 100));
+    const missed = groups.slice(0, 12).map(
+      ([start, end]) => fileLink(
+        event,
+        row.path,
+        start === end ? String(start) : `${start}\u2013${end}`,
+        `#L${start}${start === end ? "" : `-L${end}`}`
+      )
+    ).join(", ");
+    return `| ${fileLink(event, row.path, row.path)} | ${row.patch ? percent2(row.patch.percent) : "\u2014"} | ${delta(row.delta)} | ${missed || "\u2014"}${groups.length > 12 || row.uncovered.length > 100 ? " \u2026" : ""} |`;
+  });
+  return [
+    "### Changed files",
+    "",
+    "| File | Patch | Project \u0394 | Uncovered lines |",
+    "| --- | ---: | ---: | --- |",
+    ...rows,
+    ...report.changed.length > rows.length ? ["", `+${report.changed.length - rows.length} more file(s).`] : []
+  ].join("\n");
+}
+function markdownFlags({ report, config, baseline }, comment, percent2) {
+  const rows = [...report.flagTotals].flatMap(([flag, totals2]) => {
+    const isCarried = report.carried.includes(flag);
+    return isCarried && comment && !config.comment.carryforward ? [] : [
+      `- **${escapeMarkdown(flag)}** \xB7 ${percent2(totals2.percent)}${isCarried ? ` \xB7 carried forward from ${baseline?.sha.slice(0, 12)}` : ""}`
+    ];
+  });
+  rows.push(...report.missing.map((flag) => `- **${escapeMarkdown(flag)}** \xB7 missing`));
+  return rows.length ? ["### Flags", "", ...rows].join("\n") : "";
+}
+function markdown(display, comment = false) {
+  const { report, config, event, reportId, htmlId, outputRunId } = display;
+  const percent2 = (value) => formatPercent(value, config);
+  const delta = (value) => value === void 0 ? "\u2014" : `${value > 0 ? "\u25B2 +" : value < 0 ? "\u25BC \u2212" : ""}${percent2(Math.abs(value)).replace("%", " pp")}`;
+  const layout = config.comment.layout;
+  const include2 = (...keys) => !comment || !layout || keys.some((key) => layout.has(key));
+  const sections = markdownHeader(display, include2("header", "reach", "diff"), percent2, delta);
   if (report.changed.length && config.comment.maxFiles && include2("files", "diff", "reach")) {
-    const rows = report.changed.slice(0, config.comment.maxFiles).map((row) => {
-      const groups = ranges(row.uncovered.slice(0, 100));
-      const missed = groups.slice(0, 12).map(
-        ([start, end]) => fileLink(
-          event,
-          row.path,
-          start === end ? String(start) : `${start}\u2013${end}`,
-          `#L${start}${start === end ? "" : `-L${end}`}`
-        )
-      ).join(", ");
-      return `| ${fileLink(event, row.path, row.path)} | ${row.patch ? percent2(row.patch.percent) : "\u2014"} | ${delta(row.delta)} | ${missed || "\u2014"}${groups.length > 12 || row.uncovered.length > 100 ? " \u2026" : ""} |`;
-    });
-    sections.push(
-      [
-        "### Changed files",
-        "",
-        "| File | Patch | Project \u0394 | Uncovered lines |",
-        "| --- | ---: | ---: | --- |",
-        ...rows,
-        ...report.changed.length > rows.length ? ["", `+${report.changed.length - rows.length} more file(s).`] : []
-      ].join("\n")
-    );
+    sections.push(markdownChangedFiles(display, percent2, delta));
   }
   if (config.comment.indirect && report.indirect.length && include2("indirect", "files")) {
     const rows = report.indirect.slice(0, config.comment.maxFiles).map((item) => `- ${fileLink(event, item.path, item.path)} \xB7 ${delta(item.delta)}`);
@@ -153327,15 +153385,9 @@ function markdown({
       rows.push(`- +${report.indirect.length - rows.length} more file(s)`);
     sections.push(["### Indirect changes", "", ...rows].join("\n"));
   }
-  if ((report.flagTotals.size || report.missing.length) && include2("flags")) {
-    const rows = [...report.flagTotals].flatMap(([flag, totals2]) => {
-      const isCarried = report.carried.includes(flag);
-      return isCarried && comment && !config.comment.carryforward ? [] : [
-        `- **${escapeMarkdown(flag)}** \xB7 ${percent2(totals2.percent)}${isCarried ? ` \xB7 carried forward from ${baseline?.sha.slice(0, 12)}` : ""}`
-      ];
-    });
-    rows.push(...report.missing.map((flag) => `- **${escapeMarkdown(flag)}** \xB7 missing`));
-    if (rows.length) sections.push(["### Flags", "", ...rows].join("\n"));
+  if (include2("flags")) {
+    const section = markdownFlags(display, comment, percent2);
+    if (section) sections.push(section);
   }
   if (report.componentTotals.size && include2("components")) {
     const rows = [...report.componentTotals.values()].map(
@@ -153371,6 +153423,42 @@ function boundedMarkdown(sections, footer) {
   }
   return [...chunks, footer].join("\n\n");
 }
+async function publishCheck(api, event, {
+  name,
+  output,
+  conclusion,
+  annotations,
+  details_url
+}) {
+  const chunks = annotationBatches(annotations);
+  const first = chunks.shift();
+  const { data: run } = await api.rest.checks.create({
+    ...event.repo,
+    name,
+    head_sha: event.commit,
+    external_id: `${event.runId}:${event.attempt}:${name}`,
+    details_url,
+    output: { ...output, annotations: first },
+    status: "completed",
+    conclusion
+  });
+  for (const [index, batch] of chunks.entries()) {
+    try {
+      await api.rest.checks.update({
+        ...event.repo,
+        check_run_id: run.id,
+        output: { ...output, annotations: batch }
+      });
+    } catch (error2) {
+      if (statusCode(error2) !== 404) throw error2;
+      const remaining = annotations.length - checkAnnotationBatchSize * (index + 1);
+      warning(
+        `GitHub would not append ${remaining} more annotations to ${name}. See the workflow summary for uncovered lines.`
+      );
+      break;
+    }
+  }
+}
 async function writeChecks(api, namespace, display) {
   const { event, report } = display;
   for (const check2 of report.checks) {
@@ -153384,34 +153472,13 @@ async function writeChecks(api, namespace, display) {
     const annotations = check2.name === "patch" ? report.annotations : [];
     const details_url = `${projectUrl(event)}/actions/runs/${event.runId}`;
     try {
-      const chunks = annotationBatches(annotations);
-      const first = chunks.shift();
-      const { data: run } = await api.rest.checks.create({
-        ...event.repo,
+      await publishCheck(api, event, {
         name,
-        head_sha: event.commit,
-        external_id: `${event.runId}:${event.attempt}:${name}`,
-        details_url,
-        output: { ...output, annotations: first },
-        status: "completed",
-        conclusion: check2.conclusion
+        output,
+        conclusion: check2.conclusion,
+        annotations,
+        details_url
       });
-      for (const [index, batch] of chunks.entries()) {
-        try {
-          await api.rest.checks.update({
-            ...event.repo,
-            check_run_id: run.id,
-            output: { ...output, annotations: batch }
-          });
-        } catch (error2) {
-          if (statusCode(error2) !== 404) throw error2;
-          const remaining = annotations.length - checkAnnotationBatchSize * (index + 1);
-          warning(
-            `GitHub would not append ${remaining} more annotations to ${name}. See the workflow summary for uncovered lines.`
-          );
-          break;
-        }
-      }
     } catch (error2) {
       if (statusCode(error2) === 403)
         throw new Error("GitHub refused to write coverage checks. Grant checks: write to this job.", {
@@ -153439,15 +153506,7 @@ async function authenticatedLogin(api) {
     return void 0;
   }
 }
-async function stickyComment(api, namespace, display) {
-  const { event, report, config } = display;
-  if (!event.pull || config.comment.behavior === "off") return;
-  const failure = report.checks.some((check2) => check2.conclusion === "failure");
-  const changed = report.delta !== void 0 && report.delta !== 0 || report.changed.some((file) => file.delta !== void 0 && file.delta !== 0) || !display.baseline && report.patch.total > 0 || report.indirect.length > 0;
-  if (config.comment.failure && !failure || config.comment.changes && !changed) return;
-  const params = { ...event.repo, issue_number: event.pull.number };
-  const body2 = `${namespace.marker}
-${markdown(display, true)}`;
+async function findStickyComment(api, params, namespace) {
   let viewer;
   const own = async (login) => {
     if (!login) return false;
@@ -153455,26 +153514,37 @@ ${markdown(display, true)}`;
     viewer ??= authenticatedLogin(api);
     return login === await viewer;
   };
-  try {
-    for await (const { data } of api.paginate.iterator(api.rest.issues.listComments, {
-      ...params,
-      per_page: 100
-    })) {
-      let existing;
-      for (const item of data) {
-        if (item.body?.split(/\r?\n/, 1)[0] === namespace.marker && await own(item.user?.login)) {
-          existing = item;
-          break;
-        }
+  for await (const { data } of api.paginate.iterator(api.rest.issues.listComments, {
+    ...params,
+    per_page: 100
+  })) {
+    for (const item of data) {
+      if (item.body?.split(/\r?\n/, 1)[0] === namespace.marker && await own(item.user?.login)) {
+        return item;
       }
-      if (!existing) continue;
+    }
+  }
+}
+function shouldComment({ report, config, baseline }) {
+  const failure = report.checks.some((check2) => check2.conclusion === "failure");
+  const changed = report.delta !== void 0 && report.delta !== 0 || report.changed.some((file) => file.delta !== void 0 && file.delta !== 0) || !baseline && report.patch.total > 0 || report.indirect.length > 0;
+  return !(config.comment.failure && !failure) && !(config.comment.changes && !changed);
+}
+async function stickyComment(api, namespace, display) {
+  const { event, config } = display;
+  if (!event.pull || config.comment.behavior === "off" || !shouldComment(display)) return;
+  const params = { ...event.repo, issue_number: event.pull.number };
+  const body2 = `${namespace.marker}
+${markdown(display, true)}`;
+  try {
+    const existing = await findStickyComment(api, params, namespace);
+    if (existing) {
       if (config.comment.behavior === "once" || existing.body === body2) return;
       if (config.comment.behavior === "default") {
         await api.rest.issues.updateComment({ ...event.repo, comment_id: existing.id, body: body2 });
         return;
       }
       await api.rest.issues.deleteComment({ ...event.repo, comment_id: existing.id });
-      break;
     }
     await api.rest.issues.createComment({ ...params, body: body2 });
   } catch (error2) {
@@ -153539,15 +153609,38 @@ function detect(text) {
   if (root) return root === "coverage" ? "cobertura" : "jacoco";
   throw new Error("Could not detect coverage format. Set the format input explicitly.");
 }
+function readCoberturaLine(attributes) {
+  const branches = /\((\d+)\/(\d+)\)/.exec(attributes["condition-coverage"] ?? "");
+  return [integer(attributes.hits), Number(branches?.[1] ?? 0), Number(branches?.[2] ?? 0)];
+}
 function xml(text, format, add, normalize3) {
   const parser = new import_saxes.SaxesParser();
   const stack = [];
   const sources = [];
   let source = "";
   let filename = "";
-  let packageName = "";
+  let packageName;
   const sourceFileRows = [];
   let packages = false;
+  function readCoberturaTag({ name, attributes: a }, parent) {
+    if (name === "packages" && parent === "coverage") packages = true;
+    if (name === "source" && parent === "sources") source = "";
+    if (name === "class" && parent === "classes") filename = a.filename ?? "";
+    if (name !== "line" || !filename || stack.at(-3) !== "class" || parent !== "lines") return;
+    if (sourceFileRows.length >= maxLines) throw new Error("Too many coverage lines");
+    sourceFileRows.push([filename, a.number, readCoberturaLine(a)]);
+  }
+  function readJacocoTag({ name, attributes: a }, parent) {
+    if (name === "package") packageName = a.name;
+    if (name === "sourcefile") filename = [packageName, a.name].filter(Boolean).join("/");
+    if (name === "line" && parent === "sourcefile") {
+      const ci = integer(a.ci);
+      const mi = integer(a.mi);
+      const cb = integer(a.cb);
+      const mb = integer(a.mb);
+      if (ci || mi || cb || mb) add(filename, a.nr, ci, cb, cb + mb);
+    }
+  }
   parser.on("doctype", (declaration) => {
     if (declaration.includes("[") || /<!ENTITY/i.test(declaration)) {
       throw new Error("Coverage XML entity declarations are forbidden");
@@ -153557,37 +153650,15 @@ function xml(text, format, add, normalize3) {
     if (stack.at(-1) === "source") source += value;
   });
   parser.on("opentag", (tag2) => {
-    const { name, attributes: a } = tag2;
+    const { name } = tag2;
     const parent = stack.at(-1);
     if (!stack.length && name !== (format === "cobertura" ? "coverage" : "report")) {
       throw new Error("Unexpected coverage XML root");
     }
     stack.push(name);
     if (stack.length > 64) throw new Error("Coverage XML exceeds maximum depth");
-    if (format === "cobertura") {
-      if (name === "packages" && parent === "coverage") packages = true;
-      if (name === "source" && parent === "sources") source = "";
-      if (name === "class" && parent === "classes") filename = a.filename ?? "";
-      if (name === "line" && filename && stack.at(-3) === "class" && parent === "lines") {
-        const branches = /\((\d+)\/(\d+)\)/.exec(a["condition-coverage"] ?? "");
-        if (sourceFileRows.length >= maxLines) throw new Error("Too many coverage lines");
-        sourceFileRows.push([
-          filename,
-          a.number,
-          [integer(a.hits), Number(branches?.[1] ?? 0), Number(branches?.[2] ?? 0)]
-        ]);
-      }
-    } else {
-      if (name === "package") packageName = a.name ?? "";
-      if (name === "sourcefile") filename = [packageName, a.name].filter(Boolean).join("/");
-      if (name === "line" && parent === "sourcefile") {
-        const ci = integer(a.ci);
-        const mi = integer(a.mi);
-        const cb = integer(a.cb);
-        const mb = integer(a.mb);
-        if (ci || mi || cb || mb) add(filename, a.nr, ci, cb, cb + mb);
-      }
-    }
+    if (format === "cobertura") readCoberturaTag(tag2, parent);
+    else readJacocoTag(tag2, parent);
   });
   parser.on("closetag", (tag2) => {
     if (tag2.name === "source" && source.trim()) sources.push(source.trim());
@@ -153605,6 +153676,16 @@ function xml(text, format, add, normalize3) {
     }
     add(path4, number, line[0], line[1], line[2]);
   }
+}
+function addLcovCount(counts, kind, second, third, fourth) {
+  if (kind === "DA") {
+    counts[0] = mergeLine(counts, [integer(second)])[0];
+    return;
+  }
+  integer(second);
+  if (!third || fourth === void 0) throw new Error("Invalid LCOV branch record");
+  counts[1] += fourth !== "-" && integer(fourth) > 0 ? 1 : 0;
+  counts[2]++;
 }
 function lcov(text, add) {
   let path4 = "";
@@ -153628,48 +153709,49 @@ function lcov(text, add) {
     const [line, second, third, fourth] = entry[2].split(",");
     const number = integer(line, 1);
     const counts = lines.get(number) ?? [0, 0, 0];
-    if (entry[1] === "DA") counts[0] = mergeLine(counts, [integer(second)])[0];
-    else {
-      integer(second);
-      if (!third || fourth === void 0) throw new Error("Invalid LCOV branch record");
-      counts[1] = (counts[1] ?? 0) + (fourth !== "-" && integer(fourth) > 0 ? 1 : 0);
-      counts[2] = (counts[2] ?? 0) + 1;
-    }
+    addLcovCount(counts, entry[1], second, third, fourth);
     lines.set(number, counts);
     if (lines.size > maxLines) throw new Error("Too many LCOV lines");
   }
   flush();
+}
+function coveragePyLines(file) {
+  const lines = /* @__PURE__ */ new Map();
+  for (const [key, hit] of [
+    ["missing_lines", 0],
+    ["executed_lines", 1]
+  ]) {
+    const numbers = file[key];
+    if (!Array.isArray(numbers)) throw new Error("Invalid coverage.py line array");
+    for (const number of numbers) lines.set(integer(number, 1), [hit, 0, 0]);
+  }
+  return lines;
+}
+function addCoveragePyBranches(file, lines) {
+  for (const [key, hit] of [
+    ["missing_branches", 0],
+    ["executed_branches", 1]
+  ]) {
+    const arcs = file[key] ?? [];
+    if (!Array.isArray(arcs)) throw new Error("Invalid coverage.py branch array");
+    for (const arc of arcs) {
+      if (!Array.isArray(arc) || arc.length !== 2 || !Number.isSafeInteger(arc[1])) {
+        throw new Error("Invalid coverage.py branch arc");
+      }
+      const line = lines.get(integer(arc[0], 1));
+      if (!line) continue;
+      line[1] += hit;
+      line[2]++;
+    }
+  }
 }
 function coveragePy(text, add) {
   const data = record(JSON.parse(text));
   integer(record(data.meta).format, 1);
   for (const [path4, raw] of Object.entries(record(data.files))) {
     const file = record(raw);
-    const lines = /* @__PURE__ */ new Map();
-    for (const [key, hit] of [
-      ["missing_lines", 0],
-      ["executed_lines", 1]
-    ]) {
-      const numbers = file[key];
-      if (!Array.isArray(numbers)) throw new Error("Invalid coverage.py line array");
-      for (const number of numbers) lines.set(integer(number, 1), [hit, 0, 0]);
-    }
-    for (const [key, hit] of [
-      ["missing_branches", 0],
-      ["executed_branches", 1]
-    ]) {
-      const arcs = file[key] ?? [];
-      if (!Array.isArray(arcs)) throw new Error("Invalid coverage.py branch array");
-      for (const arc of arcs) {
-        if (!Array.isArray(arc) || arc.length !== 2 || !Number.isSafeInteger(arc[1])) {
-          throw new Error("Invalid coverage.py branch arc");
-        }
-        const line = lines.get(integer(arc[0], 1));
-        if (!line) continue;
-        line[1] = (line[1] ?? 0) + hit;
-        line[2] = (line[2] ?? 0) + 1;
-      }
-    }
+    const lines = coveragePyLines(file);
+    addCoveragePyBranches(file, lines);
     for (const [number, line] of lines) add(path4, number, line[0], line[1], line[2]);
   }
 }
@@ -153880,25 +153962,32 @@ function sourceLines(workspace, path4, room) {
   const file = (0, import_node_path6.resolve)(workspace, path4);
   if ((0, import_node_fs5.statSync)(file).size <= Math.min(room, 2e5)) return (0, import_node_fs5.readFileSync)(file, "utf8").split(/\r?\n/);
 }
+function renderSourceRows(path4, lines, workspace, remaining) {
+  const source = sourceLines(workspace, path4, remaining);
+  const display = new Set(lines.keys());
+  if (source) for (let index = 1; index <= source.length; index++) display.add(index);
+  const rows = [];
+  for (const number of [...display].sort((a, b) => a - b)) {
+    const line = lines.get(number);
+    const coverage = line ? status(line) : "";
+    const text = source?.[number - 1] ?? coverage;
+    const row = `<span class="${coverage}">${number}  ${escapeHtml(text)}</span>`;
+    remaining -= Buffer.byteLength(row);
+    if (remaining <= 0) break;
+    rows.push(row);
+  }
+  return { rows, remaining };
+}
 async function uploadHtml(report, config, event, namespace, workspace) {
   const parts = [];
   let remaining = 12 * 1024 * 1024;
   for (const [path4, lines] of report.files) {
     if (remaining <= 0) break;
     const fileTotals = totals(/* @__PURE__ */ new Map([[path4, lines]]));
-    const source = sourceLines(workspace, path4, remaining);
-    const display = new Set(lines.keys());
-    if (source) for (let index = 1; index <= source.length; index++) display.add(index);
-    const rows = [];
-    for (const number of [...display].sort((a, b) => a - b)) {
-      const line = lines.get(number);
-      const row = `<span class="${line ? status(line) : ""}">${number}  ${escapeHtml(source?.[number - 1] ?? (line ? status(line) : ""))}</span>`;
-      remaining -= Buffer.byteLength(row);
-      if (remaining <= 0) break;
-      rows.push(row);
-    }
+    const file = renderSourceRows(path4, lines, workspace, remaining);
+    remaining = file.remaining;
     parts.push(
-      `<details><summary>${escapeHtml(path4)} \xB7 ${formatPercent(fileTotals.percent, config)}</summary><pre>${rows.join("\n")}</pre></details>`
+      `<details><summary>${escapeHtml(path4)} \xB7 ${formatPercent(fileTotals.percent, config)}</summary><pre>${file.rows.join("\n")}</pre></details>`
     );
   }
   if (remaining <= 0)
@@ -153925,10 +154014,7 @@ function badge(label, value, config) {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="22" role="img" aria-label="${escapeHtml(label)}: ${message2}"><rect width="${left}" height="22" fill="#454545"/><rect x="${left}" width="78" height="22" fill="${fill}"/><g fill="#fff" text-anchor="middle" font-family="Verdana,sans-serif" font-size="11"><text x="${left / 2}" y="15">${escapeHtml(label)}</text><text x="${left + 39}" y="15">${message2}</text></g></svg>`;
   return { json: JSON.stringify({ schemaVersion: 1, label, message: message2, color }), svg };
 }
-async function publishBadge(api, event, config, report, namespace) {
-  const namespaced = namespace.check !== "mustard";
-  const branch = namespaced ? `${config.badge.branch}-${namespace.artifact.slice("mustard-".length)}` : config.badge.branch;
-  const message2 = namespaced ? `Publish Mustard coverage badges for ${namespace.check}` : "Publish Mustard coverage badges";
+async function confirmBadgeBranch(api, event, config, branch, message2) {
   if (!safePath(branch) || !/^[A-Za-z0-9][A-Za-z0-9/_-]*$/.test(branch) || branch === event.defaultBranch || config.baseline.branches.includes(branch))
     throw new Error("Badge branch must be separate from trusted branches");
   try {
@@ -153942,6 +154028,8 @@ async function publishBadge(api, event, config, report, namespace) {
   } catch (error2) {
     if (statusCode(error2) !== 404) throw error2;
   }
+}
+function badgeEntries(report, config) {
   const project = badge("coverage", report.project.percent, config);
   const tree = [
     { path: "badge.json", content: project.json },
@@ -153962,6 +154050,14 @@ async function publishBadge(api, event, config, report, namespace) {
       { path: `components/${id}.svg`, content: svg }
     );
   }
+  return tree;
+}
+async function publishBadge(api, event, config, report, namespace) {
+  const namespaced = namespace.check !== "mustard";
+  const branch = namespaced ? `${config.badge.branch}-${namespace.artifact.slice("mustard-".length)}` : config.badge.branch;
+  const message2 = namespaced ? `Publish Mustard coverage badges for ${namespace.check}` : "Publish Mustard coverage badges";
+  await confirmBadgeBranch(api, event, config, branch, message2);
+  const tree = badgeEntries(report, config);
   try {
     const { data: branchTip } = await api.rest.repos.getBranch({
       ...event.repo,
@@ -154048,6 +154144,94 @@ var package_default = {
 };
 
 // src/main.ts
+async function findBaselineStart(api, event, base, config, hasUploads) {
+  if (!base && event.event === "push" && hasUploads && (config.defaultCarryforward || [...config.flags.values()].some((flag) => flag.carryforward))) {
+    const { data } = await api.rest.repos.getCommit({ ...event.repo, ref: event.commit, per_page: 1 });
+    if (data.parents[0]) return sha(data.parents[0].sha);
+  }
+  return base;
+}
+async function changedPolicy(api, event, fromBase, text) {
+  if (event.pull && fromBase) {
+    try {
+      return (await configAt(api, event.repo, event.commit, getInput("config"))).text !== text;
+    } catch {
+      warning("Could not compare the PR configuration with the trusted configuration.");
+    }
+  }
+  return false;
+}
+async function publishArtifacts(api, event, namespace, report, {
+  config,
+  text,
+  token,
+  workspace,
+  baselineSha
+}) {
+  let htmlId;
+  const name = reportArtifactName(namespace, event.commit, event.attempt);
+  const { id, digest } = await putArtifact(
+    name,
+    /* @__PURE__ */ new Map([
+      [
+        "report.json.gz",
+        gz({
+          schema,
+          commit: event.commit,
+          flags: Object.fromEntries([...report.flags].map(([flag, files]) => [flag, serialize(files)]))
+        })
+      ],
+      [
+        "summary.json",
+        JSON.stringify({
+          project: report.project,
+          patch: report.patch,
+          delta: report.delta,
+          flags: Object.fromEntries(report.flagTotals),
+          components: Object.fromEntries(report.componentTotals),
+          files: Object.fromEntries(
+            [...report.files].map(([path4, lines]) => [path4, totals(/* @__PURE__ */ new Map([[path4, lines]])).percent])
+          )
+        })
+      ],
+      [
+        "meta.json",
+        JSON.stringify({
+          schema,
+          sha: event.commit,
+          event: event.event,
+          run_id: event.runId,
+          run_attempt: event.attempt,
+          workflow: event.workflow,
+          config_sha256: (0, import_node_crypto10.createHash)("sha256").update(text).digest("hex"),
+          mustard_version: package_default.version,
+          carryforward: Object.fromEntries(report.carried.map((flag) => [flag, baselineSha]))
+        })
+      ]
+    ]),
+    retention()
+  );
+  if (event.branch && isProtectedSource(event, config.baseline.branches) && await protectedBranch(api, event, event.branch)) {
+    await signReport(api, event, name, digest, token, config, retention());
+  }
+  if (config.html && event.mode === "report") {
+    const { id: id2 } = await uploadHtml(report, config, event, namespace, event.fork ? void 0 : workspace);
+    htmlId = id2;
+  }
+  return { reportId: id, htmlId };
+}
+async function pullIsCurrent(api, event) {
+  if (!event.pull) return true;
+  const { data: current } = await api.rest.pulls.get({ ...event.repo, pull_number: event.pull.number });
+  if (current.head.sha !== event.commit || current.base.ref !== event.pull.base.ref || current.state !== "open") {
+    info("The pull request changed while Mustard was reporting.");
+    return false;
+  }
+  return true;
+}
+function shouldPublishBadge(config, event) {
+  return config.badge.enabled && event.event === "push" && event.branch === event.defaultBranch;
+}
 async function main() {
   const mode = getInput("mode") || "report";
   if (mode !== "upload" && mode !== "report" && mode !== "comment")
@@ -154058,6 +154242,9 @@ async function main() {
   const api = getOctokit(token, { request: { timeout: 3e4 } });
   const workspace = (0, import_node_fs6.realpathSync)(process.env.GITHUB_WORKSPACE ?? process.cwd());
   if (mode === "upload") return upload(api, namespace, workspace);
+  return reportCoverage(api, mode, namespace, token, workspace);
+}
+async function reportCoverage(api, mode, namespace, token, workspace) {
   const started = Date.now();
   const event = await getEvent(api, mode);
   if (!event) {
@@ -154070,75 +154257,17 @@ async function main() {
   info(
     `Read ${uploads.size} coverage flag(s) and ${diff.size} changed file(s) in ${Math.round((Date.now() - started) / 1e3)}s`
   );
-  let baselineStart = base;
-  if (!baselineStart && event.event === "push" && uploads.size && (config.defaultCarryforward || [...config.flags.values()].some((flag) => flag.carryforward))) {
-    const { data } = await api.rest.repos.getCommit({ ...event.repo, ref: event.commit, per_page: 1 });
-    if (data.parents[0]) baselineStart = sha(data.parents[0].sha);
-  }
+  const baselineStart = await findBaselineStart(api, event, base, config, uploads.size > 0);
   const baseline = baselineStart && uploads.size ? await findBaseline(api, event, baselineStart, token, config, namespace) : void 0;
   const report = compute(uploads, diff, config, baseline?.flags, complete, !!base);
-  let configChanged = false;
-  if (event.pull && fromBase) {
-    try {
-      configChanged = (await configAt(api, event.repo, event.commit, getInput("config"))).text !== text;
-    } catch {
-      warning("Could not compare the PR configuration with the trusted configuration.");
-    }
-  }
-  let reportId;
-  let htmlId;
-  if (uploads.size) {
-    const name = reportArtifactName(namespace, event.commit, event.attempt);
-    const { id, digest } = await putArtifact(
-      name,
-      /* @__PURE__ */ new Map([
-        [
-          "report.json.gz",
-          gz({
-            schema,
-            commit: event.commit,
-            flags: Object.fromEntries([...report.flags].map(([flag, files]) => [flag, serialize(files)]))
-          })
-        ],
-        [
-          "summary.json",
-          JSON.stringify({
-            project: report.project,
-            patch: report.patch,
-            delta: report.delta,
-            flags: Object.fromEntries(report.flagTotals),
-            components: Object.fromEntries(report.componentTotals),
-            files: Object.fromEntries(
-              [...report.files].map(([path4, lines]) => [path4, totals(/* @__PURE__ */ new Map([[path4, lines]])).percent])
-            )
-          })
-        ],
-        [
-          "meta.json",
-          JSON.stringify({
-            schema,
-            sha: event.commit,
-            event: event.event,
-            run_id: event.runId,
-            run_attempt: event.attempt,
-            workflow: event.workflow,
-            config_sha256: (0, import_node_crypto10.createHash)("sha256").update(text).digest("hex"),
-            mustard_version: package_default.version,
-            carryforward: Object.fromEntries(report.carried.map((flag) => [flag, baseline?.sha]))
-          })
-        ]
-      ]),
-      retention()
-    );
-    reportId = id;
-    if (event.branch && isProtectedSource(event, config.baseline.branches) && await protectedBranch(api, event, event.branch)) {
-      await signReport(api, event, name, digest, token, config, retention());
-    }
-    if (config.html && mode === "report") {
-      const { id: id2 } = await uploadHtml(report, config, event, namespace, event.fork ? void 0 : workspace);
-      htmlId = id2;
-    }
-  }
+  const configChanged = await changedPolicy(api, event, fromBase, text);
+  const { reportId, htmlId } = uploads.size ? await publishArtifacts(api, event, namespace, report, {
+    config,
+    text,
+    token,
+    workspace,
+    baselineSha: baseline?.sha
+  }) : {};
   const display = {
     report,
     config,
@@ -154153,17 +154282,11 @@ async function main() {
   };
   await publishSummary(display);
   if (event.base && (!event.fork || mode === "comment")) {
-    if (event.pull) {
-      const { data: current } = await api.rest.pulls.get({ ...event.repo, pull_number: event.pull.number });
-      if (current.head.sha !== event.commit || current.base.ref !== event.pull.base.ref || current.state !== "open") {
-        info("The pull request changed while Mustard was reporting.");
-        return;
-      }
-    }
+    if (!await pullIsCurrent(api, event)) return;
     await writeChecks(api, namespace, display);
     await stickyComment(api, namespace, display);
   }
-  if (reportId && config.badge.enabled && event.event === "push" && event.branch === event.defaultBranch) {
+  if (reportId && shouldPublishBadge(config, event)) {
     await publishBadge(api, event, config, report, namespace);
   }
   info(`Mustard finished in ${Math.round((Date.now() - started) / 1e3)}s`);
