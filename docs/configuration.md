@@ -65,12 +65,24 @@ restricted to the configured paths. Use this for path-filtered jobs whose
 sources and tests are unchanged when skipped. `status: true` enables the
 corresponding project-style `mustard/flag/api` check.
 
+`required: true` marks the report incomplete when that flag has no upload for
+the attempt. Checks without a `flags` filter, and checks filtered to the missing
+flag, then fail. An incomplete report does not update the badge or become a
+baseline, and Mustard skips earlier baselines that lack a required flag. With
+`carryforward: true`, carried-forward coverage satisfies a required flag, and
+the flags table shows it as carried forward. Leave carryforward off for suites
+that must upload on every run. See
+[combining suites](github-actions/workflow-recipes.md#combine-test-shards-or-suites).
+
 ```yaml
 flags:
   api:
     paths: [services/api/**]
     carryforward: true
     status: true
+  cpp:
+    paths: [windows/**]
+    required: true
 
 component_management:
   individual_components:

@@ -68,6 +68,40 @@ it cannot tell which uploads to replace. Add shard IDs and start a new run. For
 path-filtered suites, see
 [flag settings and carryforward](../configuration.md#flags-and-components).
 
+Suites in different languages can share a report. Mustard merges Cobertura,
+LCOV, and the other formats by repository path and line, so the project and
+patch results cover every suite. Upload each suite with its own flag in the same
+namespace, and mark the suites that every run must include as required:
+
+```yaml
+flags:
+  python: { paths: [src/**], required: true }
+  cpp: { paths: [windows/**], required: true }
+```
+
+Run the report job after every producer, even one that failed, so the summary
+can name a suite that did not upload:
+
+```yaml
+coverage:
+  needs: [python-tests, windows-tests]
+  if: always() && !cancelled()
+```
+
+When a required flag has no upload, the report is incomplete. The summary and PR
+comment name the missing flag, checks without a `flags` filter fail, and
+`fail-ci` fails the step. The badge and baseline keep their last complete
+values. Checks filtered to the suites that reported still give their usual
+result. The flags table lists each suite's project and patch coverage, its
+covered lines, and whether it was uploaded, carried forward, or missing.
+
+To gate each suite's patch separately, add named patch checks with a `flags`
+filter, such as `cpp: { flags: [cpp], target: 90% }`.
+
+When you add a required flag, earlier baselines lack it, so Mustard skips them.
+Project checks with an `auto` target use `if_no_baseline` until a complete
+default-branch run publishes a new baseline.
+
 ## Publish a badge
 
 Add the following to the default branch's `.github/mustard.yml`.

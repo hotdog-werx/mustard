@@ -90,6 +90,7 @@ async function publishArtifacts(
           delta: report.delta,
           flags: Object.fromEntries(report.flagTotals),
           components: Object.fromEntries(report.componentTotals),
+          missing_required_flags: report.incomplete,
           files: Object.fromEntries(
             [...report.files].map(([path, lines]) => [path, totals(new Map([[path, lines]])).percent]),
           ),
@@ -112,7 +113,10 @@ async function publishArtifacts(
     ]),
     retention(),
   );
+  // An incomplete report could still be read as a baseline under attestations: off,
+  // so findBaseline also rejects reports missing a required flag.
   if (
+    !report.incomplete.length &&
     event.branch &&
     isProtectedSource(event, config.baseline.branches) &&
     (await protectedBranch(api, event, event.branch))
@@ -219,16 +223,22 @@ async function reportCoverage(
     await writeChecks(api, namespace, display);
     await stickyComment(api, namespace, display);
   }
-  if (reportId && shouldPublishBadge(config, event)) {
-    await publishBadge(api, event, config, report, namespace);
-  }
+  if (reportId && shouldPublishBadge(config, event)) await updateBadge(api, event, config, report, namespace);
   info(`Mustard finished in ${Math.round((Date.now() - started) / 1000)}s`);
   const failed = report.checks.filter((check) => check.conclusion === 'failure');
-  if (getBooleanInput('fail-ci') && failed.length) {
+  if (getBooleanInput('fail-ci') && (failed.length || report.incomplete.length)) {
     setFailed(
       failureMessage(failed, report, namespace.check, { fromBase, hasConfig: !!text, configChanged }),
     );
   }
+}
+
+/** Publishes badges only from complete reports, keeping the last complete snapshot otherwise. */
+async function updateBadge(api: GitHub, event: Event, config: Config, report: Report, namespace: Names) {
+  // The badge branch holds one snapshot, so a partial publish would also drop
+  // badges for the suites that did report.
+  if (report.incomplete.length) info('Skipping the badge because required coverage flags are missing.');
+  else await publishBadge(api, event, config, report, namespace);
 }
 
 main().catch((error) =>

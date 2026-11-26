@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { warning } from '@actions/core';
+import { info, warning } from '@actions/core';
 import { attestProvenance } from '@actions/attest';
 import { bundleFromJSON } from '@sigstore/bundle';
 import { getTrustedRoot } from '@sigstore/tuf';
@@ -316,6 +316,7 @@ export async function findBaseline(
   namespace: Names,
 ) {
   const provenance = new Provenance(api, event, config);
+  const required = [...config.flags].filter(([, flag]) => flag.required).map(([name]) => name);
   async function baselineFromRun(run: Run, commit: string) {
     try {
       if (!run.head_branch || !(await protectedBranch(api, event, run.head_branch))) return;
@@ -328,7 +329,15 @@ export async function findBaseline(
         const { bytes, digest } = await downloadArtifact(event.repo, artifact, token);
         const unattested = artifacts.some((entry) => entry.name === unattestedName(name) && !entry.expired);
         await provenance.verify(name, digest, run, attempt, unattested);
-        return await readBaseline(bytes, commit, run.id, attempt, run.path);
+        const flags = await readBaseline(bytes, commit, run.id, attempt, run.path);
+        const absent = required.filter((flag) => !flags.has(flag));
+        if (!absent.length) return flags;
+        // Comparing against a report without a required suite would show a false drop
+        // or rise, so walk on to an older complete report instead.
+        info(
+          `Skipping baseline from run ${run.id}: it has no coverage for required flag(s) ${absent.join(', ')}.`,
+        );
+        return;
       }
     } catch (error) {
       warning(`Rejected coverage baseline from run ${run.id}: ${String(error)}`);
