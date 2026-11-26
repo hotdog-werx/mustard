@@ -575,20 +575,23 @@ component_management:
   });
 });
 
-test('an incomplete push fails CI but keeps the last badge and does not sign a baseline', (t) => {
+test('an incomplete push fails CI with neutral checks, keeps the last badge, and signs no baseline', (t) => {
   const fixture = scenario(t);
   fixture.writeCoverage(fullCoverage);
   const push = {
     MUSTARD_TEST_EVENT: 'push',
     MUSTARD_TEST_SIGN: 'true',
+    // Informational checks stay neutral, so only the incomplete report fails the step.
     MUSTARD_TEST_CONFIG_SUFFIX:
-      '\nbadge: {enabled: true}\nflags: {default: {required: true}, cpp: {required: true}}\n',
+      '\nbadge: {enabled: true}\nflags: {default: {required: true}, cpp: {required: true}}\ncoverage: {status: {project: {default: {informational: true}}}}\n',
   };
   ok(fixture.run({ mode: 'upload', files: 'lcov.info' }, push));
   const report = fixture.run({ 'fail-ci': 'true' }, push);
   assert.equal(report.status, 1, report.diagnostics);
   assert.match(report.stdout, /Required flag\(s\) did not report: cpp/);
   assert.equal(report.outputs['missing-required-flags'], 'cpp');
+  assert.equal(report.outputs['project-status'], 'neutral');
+  assert.match(report.stdout, /Mustard coverage is incomplete, and fail-ci is enabled/);
   assert.equal(report.outputs['project-coverage'], '100.00%');
   assert.match(report.summary, /Incomplete coverage/);
   const { archives, calls } = fixture.state();
