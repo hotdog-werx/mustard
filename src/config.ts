@@ -69,6 +69,7 @@ function bounded(value: unknown, fallback: number, max: number) {
 
 // Codecov path patterns are globs, regular expressions, or plain folder/file
 // paths. A plain path matches itself and everything below it.
+/** Compiles one path filter while preserving the distinction between folder prefixes, globs, and regular expressions. */
 function pathMatcher(pattern: string): (path: string) => boolean {
   const anchored = pattern.startsWith('^') || pattern.endsWith('$');
   const globStar = /(^|[^.])\*/.test(pattern);
@@ -87,12 +88,14 @@ function pathMatcher(pattern: string): (path: string) => boolean {
   return (path) => path === trimmed || path.startsWith(`${trimmed}/`);
 }
 
+/** Combines path filters with OR and uses the supplied default when the list is empty. */
 export function matches(globs: string[], defaultMatch = true): (path: string) => boolean {
   if (!globs.length) return () => defaultMatch;
   const matchers = globs.map(pathMatcher);
   return (path) => matchers.some((match) => match(path));
 }
 
+/** Parses a source-to-destination prefix rewrite, including rules containing Windows drive letters. */
 export function parseFix(rule: string): Fix {
   const index = rule.includes('::')
     ? rule.indexOf('::')
@@ -101,6 +104,7 @@ export function parseFix(rule: string): Fix {
   return [rule.slice(0, index), rule.slice(index + (rule.slice(index, index + 2) === '::' ? 2 : 1))];
 }
 
+/** Validates a single coverage rule and applies the defaults for project or patch checks. */
 export function gate(name: string, value: unknown, type: 'project' | 'patch'): Gate {
   const rule = value === true ? {} : object(value);
   const target =
@@ -118,6 +122,7 @@ export function gate(name: string, value: unknown, type: 'project' | 'patch'): G
   };
 }
 
+/** Expands a check kind’s shorthand settings into named coverage rules. */
 function gates(value: unknown, type: 'project' | 'patch'): Gate[] {
   if (value === false) return [];
   const entries = Object.entries(value === true ? {} : object(value));
@@ -127,6 +132,7 @@ function gates(value: unknown, type: 'project' | 'patch'): Gate[] {
     .map(([name, rule]) => gate(name === 'default' ? type : `${type}/${slug(name)}`, rule, type));
 }
 
+/** Combines Codecov-style flag defaults with Mustard’s per-flag overrides. */
 function flagConfig(root: Record<string, unknown>): Map<string, Flag> {
   const management = object(root.flag_management);
   const defaults = object(management.default_rules);
@@ -154,6 +160,7 @@ function flagConfig(root: Record<string, unknown>): Map<string, Flag> {
   return flags;
 }
 
+/** Builds component definitions and their optional project and patch checks. */
 function components(root: Record<string, unknown>): Component[] {
   const management = object(root.component_management);
   const entries = management.individual_components ?? [];
@@ -235,6 +242,7 @@ const recognized: Record<string, string[]> = {
   html: ['enabled'],
 };
 
+/** Reports unsupported configuration keys without walking into arbitrary values. */
 function warnKeys(value: unknown, warn: (message: string) => void, path = '', pattern = ''): void {
   if (value === null || typeof value !== 'object') return;
   const known = recognized[pattern];
@@ -249,14 +257,16 @@ function warnKeys(value: unknown, warn: (message: string) => void, path = '', pa
   if (!known && !wildcard) return;
   for (const [key, child] of Object.entries(value)) {
     const next = path ? `${path}.${key}` : key;
-    if (known && !known.includes(key)) warn(`Ignoring unsupported config key ${JSON.stringify(next)}`);
-    else {
-      const segment = wildcard ? '*' : key;
-      warnKeys(child, warn, next, pattern ? `${pattern}.${segment}` : segment);
+    if (known && !known.includes(key)) {
+      warn(`Ignoring unsupported config key ${JSON.stringify(next)}`);
+      continue;
     }
+    const segment = wildcard ? '*' : key;
+    warnKeys(child, warn, next, pattern ? `${pattern}.${segment}` : segment);
   }
 }
 
+/** Parses Mustard or supported Codecov YAML, validates settings, and fills missing values with defaults. */
 export function readConfig(text = '', warn: (message: string) => void = () => {}) {
   if (Buffer.byteLength(text) > 256 * 1024) throw new Error('Coverage config exceeds 256 KiB');
   const doc = parseDocument(text, { strict: true });

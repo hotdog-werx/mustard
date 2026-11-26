@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { parseCoverage } from '../src/parsers.ts';
-import { deserialize, mergeFiles, mergeLine, serialize, totals } from '../src/coverage.ts';
+import { deserialize, maxLines, mergeFiles, mergeLine, serialize, totals } from '../src/coverage.ts';
 import type { Files, FlagFiles } from '../src/coverage.ts';
 import { matches, readConfig } from '../src/config.ts';
 import { pathResolver } from '../src/upload.ts';
@@ -46,6 +46,68 @@ test('rejects XML entities and limits expanded Go blocks', () => {
   assert.throws(() => parseCoverage('SF:src/a\nDA:1,invalid\n'), /Invalid coverage count/);
 });
 
+test('keeps unreached LCOV branches in the coverage denominator', () => {
+  const data = 'SF:src/a.ts\nDA:4,2\nBRDA:4,0,0,2\nBRDA:4,0,1,-\nend_of_record\n';
+  assert.deepEqual(totals(parseCoverage(data)), { hit: 0, partial: 1, miss: 0, total: 1, percent: 0 });
+  for (const truncated of ['BRDA:4,0', 'BRDA:4,0,1']) {
+    assert.throws(() => parseCoverage(`SF:src/a.ts\n${truncated}\n`), /Invalid LCOV branch record/);
+  }
+});
+
+test('reads line-only coverage.py reports and validates the shape of line and branch arrays', () => {
+  const lineOnly = { executed_lines: [2], missing_lines: [3] };
+  const report = (file: object) => JSON.stringify({ meta: { format: 3 }, files: { 'src/example.py': file } });
+  assert.deepEqual(serialize(parseCoverage(report(lineOnly))), {
+    'src/example.py': { lines: { 2: [1], 3: [0] } },
+  });
+  assert.throws(
+    () => parseCoverage(report({ ...lineOnly, executed_lines: '2' })),
+    /Invalid coverage.py line array/,
+  );
+  assert.throws(
+    () => parseCoverage(report({ ...lineOnly, executed_branches: { 2: [3] } })),
+    /Invalid coverage.py branch array/,
+  );
+});
+
+test('JaCoCo handles the default package and ignores non-executable line entries', () => {
+  const xml = `<report><package name=""><sourcefile name="Main.java">
+    <line nr="3" mi="0" ci="0" mb="0" cb="0"/>
+    <line nr="4" mi="0" ci="2" mb="0" cb="0"/>
+  </sourcefile></package></report>`;
+  assert.deepEqual(serialize(parseCoverage(xml)), { 'Main.java': { lines: { 4: [2] } } });
+});
+
+test('Cobertura rejects oversized input and does not attribute unnamed classes to a neighboring file', () => {
+  const xml = (classes: string) =>
+    `<coverage><packages><package><classes>${classes}</classes></package></packages></coverage>`;
+  const measured = '<class filename="main.py"><lines><line number="1" hits="1"/></lines></class>';
+  const unnamed = '<class><lines><line number="2" hits="0"/></lines></class>';
+  assert.deepEqual(serialize(parseCoverage(xml(measured + unnamed))), {
+    'main.py': { lines: { 1: [1] } },
+  });
+  const repeated = '<line number="1" hits="1"/>'.repeat(maxLines + 1);
+  assert.throws(
+    () => parseCoverage(xml(`<class filename="main.py"><lines>${repeated}</lines></class>`)),
+    /Too many coverage lines/,
+  );
+});
+
+test('coverage.py branch arcs do not make otherwise unmeasured lines coverable', () => {
+  const data = JSON.stringify({
+    meta: { format: 3 },
+    files: {
+      'src/example.py': {
+        executed_lines: [2],
+        missing_lines: [],
+        executed_branches: [[2, -1]],
+        missing_branches: [[5, 6]],
+      },
+    },
+  });
+  assert.deepEqual(totals(parseCoverage(data)), { hit: 1, partial: 0, miss: 0, total: 1, percent: 100 });
+});
+
 test('normalizes paths and passes Cobertura sources to the resolver', () => {
   assert.equal(
     normalizePath('C:\\agent\\work\\repo\\src\\a.ts', 'C:\\agent\\work\\repo', '', []),
@@ -71,11 +133,26 @@ test('validates normalized paths and counts and merges branch totals', () => {
   assert.throws(() => deserialize({ '../danger': { lines: { 1: [1] } } }), /Invalid coverage path/);
   assert.throws(() => deserialize({ foo: { lines: { 1: [1, 2, 1] } } }), /Invalid coverage count/);
   assert.throws(() => deserialize({ foo: { lines: { '01': [1] } } }), /Noncanonical/);
+  for (const invalid of [1, [1, 0], ['1']]) {
+    assert.throws(() => deserialize({ foo: { lines: { 1: invalid } } }), /Invalid normalized line data/);
+  }
+  assert.deepEqual(serialize(deserialize({ foo: { lines: { 1: [1, 0, 0] } } })), {
+    foo: { lines: { 1: [1] } },
+  });
   const source = deserialize(JSON.parse('{"__proto__":{"lines":{"1":[1]}}}'));
   assert.equal(source.get('__proto__')?.get(1)?.[0], 1);
   assert.deepEqual(mergeLine([2, 1, 3], [4, 2, 2]), [6, 3, 3]);
   assert.deepEqual(mergeLine([Number.MAX_SAFE_INTEGER], [4]), [Number.MAX_SAFE_INTEGER]);
   assert.equal(totals(mergeFiles(new Map(), source)).percent, 100);
+});
+
+test('applies the normalized line limit across multiple files', () => {
+  const hit = [1];
+  const lines = Object.fromEntries(Array.from({ length: maxLines / 2 + 1 }, (_, i) => [i + 1, hit]));
+  assert.throws(
+    () => deserialize({ 'src/a.ts': { lines }, 'src/b.ts': { lines } }),
+    /Invalid normalized line data/,
+  );
 });
 
 const changes: Diff = new Map([
@@ -110,6 +187,14 @@ test('requires full patch coverage and keeps project auto neutral with no baseli
     [2, 3],
   );
   assert.equal(formatPercent(report.patch.percent, config), '33.33%');
+});
+
+test('disabling annotations leaves the failing patch verdict and coverage totals intact', () => {
+  const report = compute(views(current), changes, readConfig('annotations: {enabled: false}'));
+  assert.equal(report.checks.find(({ name }) => name === 'patch')?.conclusion, 'failure');
+  assert.deepEqual([report.patch.partial, report.patch.miss], [1, 2]);
+  assert.deepEqual(report.annotations, []);
+  assert.equal(report.omittedAnnotations, 0);
 });
 
 test('compares renamed files to baseline and reports indirect changes', () => {

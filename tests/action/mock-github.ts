@@ -35,7 +35,14 @@ assert.ok(directory, 'MUSTARD_TEST_STATE is required');
 const stateFile = join(directory, 'state.json');
 const eventKind = process.env.MUSTARD_TEST_EVENT ?? 'pull_request';
 const fork = process.env.MUSTARD_TEST_FORK === 'true' || eventKind === 'workflow_run';
-const runId = eventKind === 'push' ? 6 : eventKind === 'workflow_run' ? 8 : 7;
+const triggeringRun = {
+  ...forkRun,
+  event: process.env.MUSTARD_TEST_TRIGGER_EVENT ?? forkRun.event,
+  run_attempt: process.env.MUSTARD_TEST_LEGACY_RUN === 'true' ? undefined : forkRun.run_attempt,
+};
+const nextPush = process.env.MUSTARD_TEST_NEXT_PUSH === 'true';
+const pushCommit = nextPush ? head : base;
+const runId = eventKind === 'push' ? (nextPush ? 9 : 6) : eventKind === 'workflow_run' ? 8 : 7;
 const attempt = process.env.MUSTARD_TEST_ATTEMPT ?? (eventKind === 'push' ? '1' : '2');
 const eventFile = join(directory, 'event.json');
 const signPush = eventKind === 'push' && process.env.MUSTARD_TEST_SIGN === 'true';
@@ -50,7 +57,7 @@ writeFileSync(
   JSON.stringify({
     repository,
     ...(eventKind === 'pull_request' ? { pull_request: pull(fork) } : {}),
-    ...(eventKind === 'workflow_run' ? { action: 'completed', workflow_run: forkRun } : {}),
+    ...(eventKind === 'workflow_run' ? { action: 'completed', workflow_run: triggeringRun } : {}),
     ...(eventKind === 'merge_group' ? { merge_group: { base_sha: base, head_sha: head } } : {}),
   }),
 );
@@ -64,7 +71,7 @@ Object.assign(process.env, {
   GITHUB_RUN_ID: String(runId),
   GITHUB_RUN_ATTEMPT: attempt,
   GITHUB_WORKFLOW_REF: `${repo}/${workflow}@refs/heads/main`,
-  GITHUB_SHA: eventKind === 'push' ? base : eventKind === 'pull_request' ? merge : head,
+  GITHUB_SHA: eventKind === 'push' ? pushCommit : eventKind === 'pull_request' ? merge : head,
   GITHUB_REF: eventKind === 'push' ? 'refs/heads/main' : 'refs/pull/5/merge',
   ACTIONS_RUNTIME_TOKEN: runtimeToken,
   ACTIONS_RESULTS_URL: results,
@@ -101,11 +108,11 @@ github.get(/.*/).reply((request: Request) => {
     return [
       200,
       process.env.MUSTARD_TEST_FORK_RERUN === 'true'
-        ? { ...forkRun, run_attempt: forkRun.run_attempt + 1 }
-        : forkRun,
+        ? { ...triggeringRun, run_attempt: forkRun.run_attempt + 1 }
+        : { ...triggeringRun, status: process.env.MUSTARD_TEST_TRIGGER_STATUS ?? forkRun.status },
     ];
   }
-  if (route === '/pulls') return [200, [pull(fork)]];
+  if (route === '/pulls') return [200, process.env.MUSTARD_TEST_FORK_CLOSED === 'true' ? [] : [pull(fork)]];
   if (route === '/pulls/5') {
     const current = pull(fork);
     if (process.env.MUSTARD_TEST_PR_UPDATED === 'true') current.head.sha = merge;
@@ -141,6 +148,9 @@ github.get(/.*/).reply((request: Request) => {
   if (route === '/contents/mustard.yml') return [404, { message: 'Not Found' }];
   if (route === '/contents/.github/mustard.yml' || route === '/contents/codecov.yml') {
     const ref = url.searchParams.get('ref');
+    if (ref === head && process.env.MUSTARD_TEST_HEAD_CONFIG_UNAVAILABLE === 'true') {
+      return [403, { message: 'Resource not accessible by integration' }];
+    }
     const required = signPush || process.env.MUSTARD_TEST_REQUIRE_ATTESTATION === 'true';
     const config =
       fork && ref === head
@@ -192,9 +202,12 @@ github.get(/.*/).reply((request: Request) => {
   }
   if (route === '/issues/5/comments') return [200, []];
   if (route === '/branches/main')
-    return [200, { name: 'main', protected: true, commit: { sha: badgeTip === 'stale' ? head : base } }];
-  if (route === '/branches/mustard-badges') {
-    if (badgeTip === 'unrelated' || badgeTip === 'owned')
+    return [
+      200,
+      { name: 'main', protected: true, commit: { sha: badgeTip === 'stale' ? head : pushCommit } },
+    ];
+  if (route.startsWith('/branches/mustard-badges')) {
+    if (route === '/branches/mustard-badges' && (badgeTip === 'unrelated' || badgeTip === 'owned'))
       return [200, { name: 'mustard-badges', protected: false, commit: { sha: 'existing-tip' } }];
     return [404, { message: 'Branch not found' }];
   }
@@ -206,6 +219,7 @@ github.get(/.*/).reply((request: Request) => {
         : { parents: [{ sha: base }], message: 'Existing project branch' },
     ];
   if (route === `/commits/${base}`) return [200, { parents: [] }];
+  if (route === `/commits/${head}` && nextPush) return [200, { parents: [{ sha: base }] }];
   if (route === '') return [200, repository];
   // Verbatim from GitHub: listing on a repository without attestations is a bare 404.
   if (route.startsWith('/attestations/sha256:') && planLimit) return [404, { message: 'Not Found' }];
@@ -220,11 +234,11 @@ for (const method of ['POST', 'PATCH'] as const) {
     record(method, route, body);
     if (route === '/git/trees' && method === 'POST') return [201, { sha: 'badge-tree' }];
     if (route === '/git/commits' && method === 'POST') return [201, { sha: 'badge-commit' }];
-    if (route === '/git/refs/heads/mustard-badges' && method === 'PATCH')
-      return badgeTip === 'owned'
+    if (route.startsWith('/git/refs/heads/mustard-badges') && method === 'PATCH')
+      return route === '/git/refs/heads/mustard-badges' && badgeTip === 'owned'
         ? [200, { ref: 'refs/heads/mustard-badges' }]
         : [404, { message: 'Ref not found' }];
-    if (route === '/git/refs' && method === 'POST') return [201, { ref: 'refs/heads/mustard-badges' }];
+    if (route === '/git/refs' && method === 'POST') return [201, body];
     if (route === '/attestations' && signPush) return [201, { id: 'test-attestation' }];
     if (route === '/attestations' && planLimit)
       return [
@@ -280,6 +294,7 @@ nock(results, { reqheaders: { authorization: `Bearer ${runtimeToken}` } })
     return [200, { ok: true, artifact_id: String(archive.id) }];
   });
 
+const stagedBlocks = new Map<string, Map<string, Buffer>>();
 nock(storage)
   .persist()
   .put(/\/container\/\d+\.zip$/)
@@ -290,11 +305,28 @@ nock(storage)
     assert.ok(id);
     const operation = url.searchParams.get('comp');
     if (operation === 'blocklist') {
-      assert.ok(existsSync(join(directory, `${id}.zip`)), 'Commit requires the staged ZIP block');
+      const blocks = stagedBlocks.get(id);
+      assert.ok(blocks, 'Commit requires staged ZIP blocks');
+      const ordered = [...(await request.text()).matchAll(/<Latest>([^<]+)<\/Latest>/g)].map(([, key]) => {
+        const block = blocks.get(key);
+        assert.ok(block, 'Commit referenced an unstaged block');
+        return block;
+      });
+      assert.ok(ordered.length);
+      writeFileSync(join(directory, `${id}.zip`), Buffer.concat(ordered));
+      stagedBlocks.delete(id);
     } else {
       assert.ok(operation === null || operation === 'block');
       const bytes = Buffer.from(await request.arrayBuffer());
-      writeFileSync(join(directory, `${id}.zip`), bytes);
+      if (operation === 'block') {
+        const key = url.searchParams.get('blockid');
+        assert.ok(key);
+        const blocks = stagedBlocks.get(id) ?? new Map<string, Buffer>();
+        blocks.set(key, bytes);
+        stagedBlocks.set(id, blocks);
+      } else {
+        writeFileSync(join(directory, `${id}.zip`), bytes);
+      }
     }
     return [201, '', { etag: '"test-etag"', 'last-modified': 'Thu, 01 Jan 2026 00:00:00 GMT' }];
   });

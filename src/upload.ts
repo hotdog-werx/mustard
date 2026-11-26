@@ -15,11 +15,13 @@ import type { GitHub } from './github.ts';
 import { existsIn, normalizePath } from './paths.ts';
 import { parseCoverage } from './parsers.ts';
 
+/** Reads the optional artifact retention input and validates GitHub’s allowed day range. */
 export function retention(): number | undefined {
   const value = getInput('retention-days');
   return value ? integer(value, 1, 400) : undefined;
 }
 
+/** Expands report globs against the checkout and rejects paths that can leave it. */
 function inputs(input: string, workspace: string): string[] {
   const patterns = input
     ? input
@@ -43,6 +45,7 @@ function inputs(input: string, workspace: string): string[] {
   return [...paths].sort();
 }
 
+/** Reads one coverage input while enforcing the remaining upload byte budget. */
 async function readLimited(path: string, limit: number): Promise<string> {
   if (statSync(path).size > limit) throw new Error('Coverage input exceeds the size limit');
   const stream = createReadStream(path);
@@ -61,6 +64,7 @@ async function readLimited(path: string, limit: number): Promise<string> {
 // python first on Windows.
 const pythonCommands = process.platform === 'win32' ? ['python', 'python3'] : ['python3', 'python'];
 
+/** Converts local coverage.py databases to JSON, combining parallel runs without deleting the inputs. */
 async function generateCoverage(workspace: string): Promise<string> {
   if (!globSync(['.coverage', '.coverage.*'], { cwd: workspace }).some((path) => existsIn(workspace, path))) {
     throw new Error(
@@ -105,6 +109,7 @@ async function generateCoverage(workspace: string): Promise<string> {
   }
 }
 
+/** Resolves paths against the checkout and report-specific source roots, tracking unmatched paths for diagnostics. */
 export function pathResolver(workspace: string, root: string, fixes: Fix[]) {
   const unmatched = new Set<string>();
   const normalized = new Map<string, string>();
@@ -130,6 +135,7 @@ export function pathResolver(workspace: string, root: string, fixes: Fix[]) {
   return { normalize, unmatched };
 }
 
+/** Discovers, normalizes, and uploads coverage for the exact commit, flag, and shard represented by this job. */
 export async function upload(api: GitHub, namespace: Names, workspace: string) {
   const pull = context.payload.pull_request;
   const commit = sha(pull?.head.sha ?? context.payload.merge_group?.head_sha ?? context.sha);

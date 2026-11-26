@@ -14,11 +14,13 @@ export type Annotation = {
   message: string;
 };
 
+/** Filters a coverage map by repository path without changing its line counts. */
 export function view(files: Files, globs: string[]): Files {
   const include = matches(globs);
   return new Map([...files].filter(([path]) => include(path)));
 }
 
+/** Merges the requested coverage flags into a single view without modifying the input maps. */
 function union(byFlag: FlagFiles, flags: string[] = []): Files {
   const result: Files = new Map();
   for (const [flag, files] of byFlag) {
@@ -27,6 +29,7 @@ function union(byFlag: FlagFiles, flags: string[] = []): Files {
   return result;
 }
 
+/** Selects only measured lines that changed on the new side of the diff. */
 function patchFiles(files: Files, diff: Diff): Files {
   const result: Files = new Map();
   for (const [path, change] of diff) {
@@ -37,6 +40,14 @@ function patchFiles(files: Files, diff: Diff): Files {
   return result;
 }
 
+/** Resolves automatic targets against the baseline for project checks. */
+function minimumCoverage(rule: Gate, kind: 'project' | 'patch', baseline: Files | undefined): number {
+  const target =
+    rule.target !== 'auto' ? rule.target : kind === 'project' && baseline ? totals(baseline).percent : 100;
+  return Math.max(0, target - rule.threshold);
+}
+
+/** Evaluates one coverage gate, including no-upload, no-baseline, and incomplete-diff cases. */
 function check(
   rule: Gate,
   measured: Files,
@@ -63,15 +74,14 @@ function check(
     return make(config.baseline.required ? 'failure' : rule.noBaseline, 'No baseline available.');
   }
   // A patch has no earlier equivalent, so an explicit auto target means full coverage.
-  const target =
-    rule.target !== 'auto' ? rule.target : kind === 'project' && baseline ? totals(baseline).percent : 100;
-  const minimum = Math.max(0, target - rule.threshold);
+  const minimum = minimumCoverage(rule, kind, baseline);
   return make(
     actual.percent >= minimum ? 'success' : 'failure',
     `${formatPercent(actual.percent, config)} coverage, minimum ${formatPercent(minimum, config)}.`,
   );
 }
 
+/** Formats a percentage using the repository’s configured rounding and precision. */
 export function formatPercent(value: number, config: Config): string {
   const scale = 10 ** config.precision;
   const round = { down: Math.floor, up: Math.ceil, nearest: Math.round }[config.round];
@@ -80,14 +90,8 @@ export function formatPercent(value: number, config: Config): string {
   return `${(round(stabilized) / scale).toFixed(config.precision)}%`;
 }
 
-export function compute(
-  uploads: FlagFiles,
-  diff: Diff,
-  config: Config,
-  baseline?: FlagFiles,
-  completeDiff = true,
-  hasPatch = true,
-) {
+/** Applies path filters to both snapshots and fills eligible missing flags from the baseline. */
+function prepareFlags(uploads: FlagFiles, baseline: FlagFiles | undefined, config: Config) {
   const ignored = matches(config.ignore, false);
   const filter = (files: Files, paths: string[]) =>
     new Map([...view(files, paths)].filter(([path]) => !ignored(path)));
@@ -98,10 +102,10 @@ export function compute(
   for (const [name, files] of uploads) flags.set(name, filter(files, config.flags.get(name)?.paths ?? []));
   for (const [name, files] of baseline ?? [])
     baselineFlags.set(name, filter(files, config.flags.get(name)?.paths ?? []));
-  const expected = new Set(config.flags.keys());
-  if (config.defaultCarryforward) {
-    for (const name of baselineFlags.keys()) expected.add(name);
-  }
+  const expected = new Set([
+    ...config.flags.keys(),
+    ...(config.defaultCarryforward ? baselineFlags.keys() : []),
+  ]);
   for (const name of expected) {
     if (flags.has(name)) continue;
     const carryforward = config.flags.get(name)?.carryforward ?? config.defaultCarryforward;
@@ -112,13 +116,12 @@ export function compute(
     } else missing.push(name);
   }
   assertBudget(flags.values());
-  const files = union(flags);
-  const previous = baseline ? union(baselineFlags) : undefined;
-  const patch = patchFiles(files, diff);
-  const project = totals(files);
-  const oldProject = previous ? totals(previous) : undefined;
-  const delta = oldProject ? project.percent - oldProject.percent : undefined;
-  const changed = [...diff]
+  return { flags, baselineFlags, carried, missing };
+}
+
+/** Describes measured patches and compares renamed files to their previous paths. */
+function changedFiles(diff: Diff, files: Files, patch: Files, previous: Files | undefined) {
+  return [...diff]
     .map(([path, change]) => {
       const current = files.get(path);
       const before = previous?.get(change.oldPath ?? path);
@@ -136,6 +139,10 @@ export function compute(
       };
     })
     .filter((row) => row.patch || row.delta !== undefined);
+}
+
+/** Finds coverage changes in files that are outside the PR diff. */
+function indirectChanges(diff: Diff, files: Files, previous: Files | undefined) {
   const indirect = [];
   const renamed = new Set([...diff.values()].map((value) => value.oldPath));
   if (previous) {
@@ -146,28 +153,48 @@ export function compute(
       if (change !== 0) indirect.push({ path, delta: change });
     }
   }
+  return indirect;
+}
+
+/** Evaluates project, patch, flag, and component checks against their selected coverage. */
+function coverageChecks(
+  flags: FlagFiles,
+  baselineFlags: FlagFiles | undefined,
+  diff: Diff,
+  config: Config,
+  {
+    hasUploads,
+    completeDiff,
+    hasPatch,
+    hasIndirectChanges,
+  }: {
+    hasUploads: boolean;
+    completeDiff: boolean;
+    hasPatch: boolean;
+    hasIndirectChanges: boolean;
+  },
+) {
   const evaluate = (rule: Gate, kind: 'project' | 'patch', componentPaths: string[] = []) => {
     const selection = view(view(union(flags, rule.flags), rule.paths), componentPaths);
-    const prior = baseline
+    const prior = baselineFlags
       ? view(view(union(baselineFlags, rule.flags), rule.paths), componentPaths)
       : undefined;
-    const hasUploads = rule.flags.length
-      ? rule.flags.some((name) => flags.has(name)) && uploads.size > 0
-      : uploads.size > 0;
+    const hasSelectedUploads =
+      hasUploads && (!rule.flags.length || rule.flags.some((name) => flags.has(name)));
     return check(
       rule,
       kind === 'patch' ? patchFiles(selection, diff) : selection,
       prior,
       config,
       kind,
-      hasUploads,
+      hasSelectedUploads,
       completeDiff,
     );
   };
   const projectChecks = config.project.map((rule) => evaluate(rule, 'project'));
   const primary = projectChecks.find((result) => result.name === 'project');
   const defaultRule = config.project.find((rule) => rule.name === 'project');
-  if (config.indirectFail && primary && indirect.length && uploads.size) {
+  if (config.indirectFail && primary && hasIndirectChanges && hasUploads) {
     primary.conclusion = defaultRule?.informational ? 'neutral' : 'failure';
     primary.message += ' Coverage changed in files outside the diff.';
   }
@@ -180,27 +207,58 @@ export function compute(
       .filter((rule) => hasPatch || rule.type !== 'patch')
       .map((rule) => evaluate(rule, rule.type, component.paths)),
   );
-  const patchTotal = totals(patch);
-  const patchGate = patchChecks.find((result) => result.name === 'patch');
+  return [...projectChecks, ...patchChecks, ...flagChecks, ...componentChecks];
+}
+
+/** Builds a bounded list of annotations for the default patch check. */
+function annotatePatch(patch: Files, patchGate: Check | undefined, maximum: number): Annotation[] {
   const annotations: Annotation[] = [];
-  if (config.annotations.enabled && patchGate) {
-    for (const [path, lines] of patch) {
-      for (const [number, line] of lines) {
-        const kind = status(line);
-        if (kind === 'hit' || annotations.length >= config.annotations.max) continue;
-        annotations.push({
-          path,
-          start_line: number,
-          end_line: number,
-          annotation_level: patchGate.conclusion === 'failure' ? 'failure' : 'warning',
-          message:
-            kind === 'partial'
-              ? 'Changed line has incomplete branch coverage.'
-              : 'Changed line is uncovered.',
-        });
-      }
+  if (!patchGate) return annotations;
+  const annotation_level = patchGate.conclusion === 'failure' ? 'failure' : 'warning';
+  for (const [path, lines] of patch) {
+    for (const [number, line] of lines) {
+      const kind = status(line);
+      if (kind === 'hit' || annotations.length >= maximum) continue;
+      annotations.push({
+        path,
+        start_line: number,
+        end_line: number,
+        annotation_level,
+        message:
+          kind === 'partial' ? 'Changed line has incomplete branch coverage.' : 'Changed line is uncovered.',
+      });
     }
   }
+  return annotations;
+}
+
+/** Builds the project, patch, and component results, including baseline deltas and line annotations. */
+export function compute(
+  uploads: FlagFiles,
+  diff: Diff,
+  config: Config,
+  baseline?: FlagFiles,
+  completeDiff = true,
+  hasPatch = true,
+) {
+  const { flags, baselineFlags, carried, missing } = prepareFlags(uploads, baseline, config);
+  const files = union(flags);
+  const previous = baseline ? union(baselineFlags) : undefined;
+  const patch = patchFiles(files, diff);
+  const project = totals(files);
+  const oldProject = previous ? totals(previous) : undefined;
+  const delta = oldProject ? project.percent - oldProject.percent : undefined;
+  const changed = changedFiles(diff, files, patch, previous);
+  const indirect = indirectChanges(diff, files, previous);
+  const checks = coverageChecks(flags, baseline ? baselineFlags : undefined, diff, config, {
+    hasUploads: uploads.size > 0,
+    completeDiff,
+    hasPatch,
+    hasIndirectChanges: indirect.length > 0,
+  });
+  const patchTotal = totals(patch);
+  const patchGate = config.annotations.enabled ? checks.find((result) => result.name === 'patch') : undefined;
+  const annotations = annotatePatch(patch, patchGate, config.annotations.max);
   return {
     files,
     flags,
@@ -212,9 +270,8 @@ export function compute(
     changed,
     indirect,
     annotations,
-    omittedAnnotations:
-      config.annotations.enabled && patchGate ? patchTotal.total - patchTotal.hit - annotations.length : 0,
-    checks: [...projectChecks, ...patchChecks, ...flagChecks, ...componentChecks],
+    omittedAnnotations: patchGate ? patchTotal.total - patchTotal.hit - annotations.length : 0,
+    checks,
     flagTotals: new Map([...flags].map(([name, data]) => [name, totals(data)])),
     componentTotals: new Map(
       config.components.map((component) => [
@@ -229,6 +286,7 @@ export function compute(
   };
 }
 
+/** Computes the fully covered percentage for a single file. */
 function filePercent(path: string, lines: Map<number, Line>): number {
   return totals(new Map([[path, lines]])).percent;
 }

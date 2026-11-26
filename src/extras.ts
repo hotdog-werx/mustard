@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { putArtifact } from './artifacts.ts';
 import type { Names } from './artifacts.ts';
 import { maxBytes, safePath, status, totals } from './coverage.ts';
+import type { Line } from './coverage.ts';
 import type { Config } from './config.ts';
 import { existsIn } from './paths.ts';
 import { escapeHtml } from './publish.ts';
@@ -22,12 +23,37 @@ pre{overflow:auto;padding:1rem;background:#f6f8fa;line-height:1.5}
 </style><main><h1>${escapeHtml(title)}</h1>${body}</main></html>`;
 }
 
+/** Loads source text only from a safe checkout path that fits the HTML report’s remaining budget. */
 function sourceLines(workspace: string | undefined, path: string, room: number): string[] | undefined {
   if (!workspace || !existsIn(workspace, path)) return;
   const file = resolve(workspace, path);
   if (statSync(file).size <= Math.min(room, 200_000)) return readFileSync(file, 'utf8').split(/\r?\n/);
 }
 
+/** Formats source and coverage lines until the report exhausts its remaining byte budget. */
+function renderSourceRows(
+  path: string,
+  lines: Map<number, Line>,
+  workspace: string | undefined,
+  remaining: number,
+) {
+  const source = sourceLines(workspace, path, remaining);
+  const display = new Set(lines.keys());
+  if (source) for (let index = 1; index <= source.length; index++) display.add(index);
+  const rows: string[] = [];
+  for (const number of [...display].sort((a, b) => a - b)) {
+    const line = lines.get(number);
+    const coverage = line ? status(line) : '';
+    const text = source?.[number - 1] ?? coverage;
+    const row = `<span class="${coverage}">${number}  ${escapeHtml(text)}</span>`;
+    remaining -= Buffer.byteLength(row);
+    if (remaining <= 0) break;
+    rows.push(row);
+  }
+  return { rows, remaining };
+}
+
+/** Uploads a bounded HTML report, including checked-out source when the caller provides a trusted workspace. */
 export async function uploadHtml(
   report: Report,
   config: Config,
@@ -40,19 +66,10 @@ export async function uploadHtml(
   for (const [path, lines] of report.files) {
     if (remaining <= 0) break;
     const fileTotals = totals(new Map([[path, lines]]));
-    const source = sourceLines(workspace, path, remaining);
-    const display = new Set(lines.keys());
-    if (source) for (let index = 1; index <= source.length; index++) display.add(index);
-    const rows: string[] = [];
-    for (const number of [...display].sort((a, b) => a - b)) {
-      const line = lines.get(number);
-      const row = `<span class="${line ? status(line) : ''}">${number}  ${escapeHtml(source?.[number - 1] ?? (line ? status(line) : ''))}</span>`;
-      remaining -= Buffer.byteLength(row);
-      if (remaining <= 0) break;
-      rows.push(row);
-    }
+    const file = renderSourceRows(path, lines, workspace, remaining);
+    remaining = file.remaining;
     parts.push(
-      `<details><summary>${escapeHtml(path)} · ${formatPercent(fileTotals.percent, config)}</summary><pre>${rows.join('\n')}</pre></details>`,
+      `<details><summary>${escapeHtml(path)} · ${formatPercent(fileTotals.percent, config)}</summary><pre>${file.rows.join('\n')}</pre></details>`,
     );
   }
   if (remaining <= 0)
@@ -70,6 +87,7 @@ export async function uploadHtml(
   );
 }
 
+/** Renders both a Shields-compatible payload and an SVG for one coverage total. */
 function badge(label: string, value: number, config: Config) {
   const message = formatPercent(value, config);
   const [low, high] = config.range;
@@ -82,20 +100,14 @@ function badge(label: string, value: number, config: Config) {
   return { json: JSON.stringify({ schemaVersion: 1, label, message, color }), svg };
 }
 
-export async function publishBadge(
+/** Rejects badge branches belonging to the repository or another publisher. */
+async function confirmBadgeBranch(
   api: GitHub,
   event: Event,
   config: Config,
-  report: Report,
-  namespace: Names,
+  branch: string,
+  message: string,
 ) {
-  const namespaced = namespace.check !== 'mustard';
-  const branch = namespaced
-    ? `${config.badge.branch}-${namespace.artifact.slice('mustard-'.length)}`
-    : config.badge.branch;
-  const message = namespaced
-    ? `Publish Mustard coverage badges for ${namespace.check}`
-    : 'Publish Mustard coverage badges';
   if (
     !safePath(branch) ||
     !/^[A-Za-z0-9][A-Za-z0-9/_-]*$/.test(branch) ||
@@ -114,6 +126,9 @@ export async function publishBadge(
   } catch (error) {
     if (statusCode(error) !== 404) throw error;
   }
+}
+
+function badgeEntries(report: Report, config: Config) {
   const project = badge('coverage', report.project.percent, config);
   const tree = [
     { path: 'badge.json', content: project.json },
@@ -134,6 +149,26 @@ export async function publishBadge(
       { path: `components/${id}.svg`, content: svg },
     );
   }
+  return tree;
+}
+
+/** Writes the configured badges to their own root commit after confirming the default-branch run is current. */
+export async function publishBadge(
+  api: GitHub,
+  event: Event,
+  config: Config,
+  report: Report,
+  namespace: Names,
+) {
+  const namespaced = namespace.check !== 'mustard';
+  const branch = namespaced
+    ? `${config.badge.branch}-${namespace.artifact.slice('mustard-'.length)}`
+    : config.badge.branch;
+  const message = namespaced
+    ? `Publish Mustard coverage badges for ${namespace.check}`
+    : 'Publish Mustard coverage badges';
+  await confirmBadgeBranch(api, event, config, branch, message);
+  const tree = badgeEntries(report, config);
   try {
     const { data: branchTip } = await api.rest.repos.getBranch({
       ...event.repo,

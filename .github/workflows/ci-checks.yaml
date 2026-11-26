@@ -78,15 +78,14 @@ jobs:
 
   coverage:
     needs: [test]
-    if: always() && !cancelled()
+    if: always() && !cancelled() && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read
       checks: write
       pull-requests: write
-      id-token: write
-      attestations: write
+      attestations: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -97,10 +96,27 @@ jobs:
           # failed coverage check so checks-complete sees it.
           fail-ci: 'true'
 
+  coverage-default:
+    needs: [test]
+    if: always() && !cancelled() && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./
+        with:
+          fail-ci: 'true'
+
   # The single required check for rulesets. It fails if any job it needs
   # failed or was cancelled.
   checks-complete:
-    needs: [repo-checks, checks, test, test-action, coverage]
+    needs: [repo-checks, checks, test, test-action, coverage, coverage-default]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}

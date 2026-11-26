@@ -8,6 +8,7 @@ import { repository, sha } from './github.ts';
 import type { Event, GitHub } from './github.ts';
 import type { Diff } from './report.ts';
 
+/** Collects added line numbers on the new side of a unified diff and rejects a truncated hunk. */
 export function newLines(patch: string, result = new Set<number>()): Set<number> {
   let next = 0;
   let remaining = 0;
@@ -27,6 +28,7 @@ export function newLines(patch: string, result = new Set<number>()): Set<number>
   return result;
 }
 
+/** Combines Git’s NUL-delimited path list and patch, retaining rename origins and deletion markers. */
 export function parseGitDiff(names: string, patch: string): Diff {
   const chunks = patch.split(/^diff --git .*\n/m).slice(1);
   const entries = names.split('\0');
@@ -50,6 +52,7 @@ export function parseGitDiff(names: string, patch: string): Diff {
   return result;
 }
 
+/** Fetches the two exact revisions into a temporary bare repository and computes their diff. */
 export function gitDiff(event: Event, base: string, token: string): Diff {
   const server = new URL(process.env.GITHUB_SERVER_URL ?? 'https://github.com');
   if (server.protocol !== 'https:' || server.username || server.password)
@@ -92,6 +95,7 @@ export function gitDiff(event: Event, base: string, token: string): Diff {
   }
 }
 
+/** Converts GitHub’s Compare API file list to a diff and marks truncated or inconsistent data. */
 export function compareFiles(
   files: Array<{
     filename: string;
@@ -120,6 +124,7 @@ export function compareFiles(
   return { diff, complete };
 }
 
+/** Finds the merge base and prefers a local Git diff, with the GitHub comparison as a fallback. */
 export async function getDiff(api: GitHub, event: Event, token: string) {
   if (!event.base) return { base: undefined, diff: new Map() as Diff, complete: true };
   const { data } = await api.rest.repos.compareCommitsWithBasehead({

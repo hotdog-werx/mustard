@@ -25,8 +25,12 @@ import githubRoot from './trust/github.json' with { type: 'json' };
 const predicateType = 'https://slsa.dev/provenance/v1';
 const issuer = 'https://token.actions.githubusercontent.com';
 
-// GitHub reports plan limits with wording such as "Feature not available for
-// user-owned private repositories". Permission problems must never downgrade.
+/**
+ * Recognizes explicit attestation plan limits, including GitHub’s
+ * “Feature not available for user-owned private repositories” error.
+ * Token and permission errors must never trigger fallback.
+ */
+/** Recognizes explicit attestation plan limits while excluding token and permission errors. */
 export function unsupported(error: unknown): boolean {
   const code = statusCode(error);
   const message = error instanceof Error ? error.message : '';
@@ -40,14 +44,17 @@ export function unsupported(error: unknown): boolean {
   );
 }
 
-// Attestations are available on every public repository, so a public
-// repository never falls back. Private and internal repositories only have
-// them on some plans.
+/**
+ * Resolves repository visibility for the attestation policy.
+ * Public repositories never use the plan-limit fallback.
+ */
+/** Resolves the repository’s visibility for the attestation policy. */
 export async function publicRepository(api: GitHub, repo: Event['repo']): Promise<boolean> {
   const { data } = await api.rest.repos.get(repo);
   return data.visibility ? data.visibility === 'public' : !data.private;
 }
 
+/** Checks that a completed push run belongs to the expected repository, workflow, commit, and allowed branch. */
 export function trustedRun(run: Run, event: Event, commit: string, config: Config): boolean {
   return (
     run.head_sha === commit &&
@@ -60,12 +67,14 @@ export function trustedRun(run: Run, event: Event, commit: string, config: Confi
   );
 }
 
+/** Treats the default branch as trusted and checks branch protection for other configured branches. */
 export async function protectedBranch(api: GitHub, event: Event, branch: string): Promise<boolean> {
   if (event.defaultBranch === branch) return true;
   const { data } = await api.rest.repos.getBranch({ ...event.repo, branch });
   return data.protected;
 }
 
+/** Signs the exact report digest or records an explicit plan limit for an eligible private repository. */
 export async function signReport(
   api: GitHub,
   event: Event,
@@ -116,6 +125,7 @@ export async function signReport(
   }
 }
 
+/** Encodes a Fulcio policy value as the DER UTF-8 string expected by Sigstore. */
 function oid(number: number, text: string): NonNullable<VerificationPolicy['oids']>[number] {
   const payload = Buffer.from(text);
   const length = payload.length;
@@ -128,18 +138,26 @@ function oid(number: number, text: string): NonNullable<VerificationPolicy['oids
   };
 }
 
+/** Pins the calling workflow, source revision, and run attempt carried by the signing certificate. */
 export function attestationPolicy(
   event: Event,
   run: Run,
   allowSelfHosted: boolean,
   attempt = run.run_attempt ?? 1,
 ): VerificationPolicy {
-  const source = `${process.env.GITHUB_SERVER_URL ?? 'https://github.com'}/${repository(event.repo)}`;
+  const server = process.env.GITHUB_SERVER_URL ?? 'https://github.com';
+  const source = `${server}/${repository(event.repo)}`;
   const ref = `refs/heads/${run.head_branch}`;
   const workflow = `${source}/${run.path}@${ref}`;
-  const exact = workflow.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escapedServer = server.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return {
-    subjectAlternativeName: new RegExp(`^${exact}$`),
+    // The certificate SAN names the workflow file that ran the signing job. A
+    // job inside a reusable workflow (for example a shared CI template) has
+    // that reusable workflow as its SAN, possibly from another repository.
+    // Accept any workflow identity there and pin the trusted caller through
+    // the Build Config URI (OID 18) together with the repository, commit, ref,
+    // trigger, and exact run attempt below.
+    subjectAlternativeName: new RegExp(`^${escapedServer}/[^/]+/[^/]+/\\.github/workflows/[^/@]+@.+$`),
     extensions: { issuer },
     oids: [
       oid(12, source),
@@ -153,6 +171,7 @@ export function attestationPolicy(
   };
 }
 
+/** Requires a SLSA provenance statement naming the exact report and its SHA-256 digest. */
 export function assertSubject(payload: Buffer, name: string, digest: string) {
   const statement = record(JSON.parse(payload.toString('utf8')));
   if (
@@ -170,6 +189,7 @@ export function assertSubject(payload: Buffer, name: string, digest: string) {
     throw new Error('Attestation does not match the coverage artifact digest');
 }
 
+/** Loads the appropriate Sigstore trust root and applies the transparency and timestamp requirements. */
 async function createVerifier(privateRepo: boolean): Promise<Verifier> {
   const directory = await mkdtemp(join(tmpdir(), 'mustard-tuf-'));
   try {
@@ -191,6 +211,7 @@ async function createVerifier(privateRepo: boolean): Promise<Verifier> {
   }
 }
 
+/** Verifies baseline attestations and caches repository-level trust data for one lookup. */
 export class Provenance {
   private verifier?: Promise<Verifier>;
   private unavailable = false;
@@ -219,6 +240,7 @@ export class Provenance {
     );
   }
 
+  /** Checks signatures and report identity, applying the configured fallback only when eligible. */
   async verify(
     name: string,
     digest: string,
@@ -253,27 +275,38 @@ export class Provenance {
     this.verifier ??= this.isPublic().then((isPublic) => createVerifier(!isPublic));
     const verifier = await this.verifier;
     const policy = attestationPolicy(this.event, run, this.config.baseline.selfHosted, attempt);
-    for (const entry of entries) {
-      try {
-        const bundle = bundleFromJSON(record(entry).bundle);
-        if (
-          bundle.content.$case !== 'dsseEnvelope' ||
-          bundle.content.dsseEnvelope.payloadType !== 'application/vnd.in-toto+json'
-        )
-          continue;
-        const entity = toSignedEntity(bundle);
-        if (entity.key.$case !== 'certificate') continue;
-        verifier.verify(entity, policy);
-        assertSubject(bundle.content.dsseEnvelope.payload, name, digest);
-        return;
-      } catch {
-        // A digest can have attestations from other workflows.
-      }
-    }
+    if (entries.some((entry) => matchesAttestation(entry, verifier, policy, name, digest))) return;
     throw new Error('No attestation matched the trusted workflow, run, commit, runner, and artifact');
   }
 }
 
+/** Verifies one candidate bundle against the caller identity and report digest. */
+function matchesAttestation(
+  entry: unknown,
+  verifier: Verifier,
+  policy: VerificationPolicy,
+  name: string,
+  digest: string,
+): boolean {
+  try {
+    const bundle = bundleFromJSON(record(entry).bundle);
+    if (
+      bundle.content.$case !== 'dsseEnvelope' ||
+      bundle.content.dsseEnvelope.payloadType !== 'application/vnd.in-toto+json'
+    )
+      return false;
+    const entity = toSignedEntity(bundle);
+    if (entity.key.$case !== 'certificate') return false;
+    verifier.verify(entity, policy);
+    assertSubject(bundle.content.dsseEnvelope.payload, name, digest);
+    return true;
+  } catch {
+    // A digest can have attestations from other workflows.
+    return false;
+  }
+}
+
+/** Finds the newest eligible report on the requested commit or a first-parent ancestor within the configured limit. */
 export async function findBaseline(
   api: GitHub,
   event: Event,
@@ -283,6 +316,25 @@ export async function findBaseline(
   namespace: Names,
 ) {
   const provenance = new Provenance(api, event, config);
+  async function baselineFromRun(run: Run, commit: string) {
+    try {
+      if (!run.head_branch || !(await protectedBranch(api, event, run.head_branch))) return;
+      // A report-only job may not have run on every attempt.
+      const artifacts = await listArtifacts(api, event.repo, run.id);
+      for (let attempt = run.run_attempt ?? 1; attempt >= 1; attempt--) {
+        const name = reportArtifactName(namespace, commit, attempt);
+        const artifact = artifacts.find((entry) => entry.name === name && !entry.expired);
+        if (!artifact) continue;
+        const { bytes, digest } = await downloadArtifact(event.repo, artifact, token);
+        const unattested = artifacts.some((entry) => entry.name === unattestedName(name) && !entry.expired);
+        await provenance.verify(name, digest, run, attempt, unattested);
+        return await readBaseline(bytes, commit, run.id, attempt, run.path);
+      }
+    } catch (error) {
+      warning(`Rejected coverage baseline from run ${run.id}: ${String(error)}`);
+    }
+  }
+
   let commit = start;
   for (let distance = 0; distance <= config.baseline.maxWalk; distance++) {
     const { data } = await api.rest.actions.listWorkflowRunsForRepo({
@@ -298,26 +350,8 @@ export async function findBaseline(
         (a, b) => (b.run_attempt ?? 1) - (a.run_attempt ?? 1) || b.updated_at.localeCompare(a.updated_at),
       );
     for (const run of runs) {
-      try {
-        if (!run.head_branch || !(await protectedBranch(api, event, run.head_branch))) continue;
-        // Newer attempts may not have rerun the report job, so fall back to the
-        // newest attempt that produced a report.
-        const artifacts = await listArtifacts(api, event.repo, run.id);
-        for (let attempt = run.run_attempt ?? 1; attempt >= 1; attempt--) {
-          const name = reportArtifactName(namespace, commit, attempt);
-          const artifact = artifacts.find((entry) => entry.name === name && !entry.expired);
-          if (!artifact) continue;
-          const { bytes, digest } = await downloadArtifact(event.repo, artifact, token);
-          const unattested = artifacts.some((entry) => entry.name === unattestedName(name) && !entry.expired);
-          await provenance.verify(name, digest, run, attempt, unattested);
-          const flags = await readBaseline(bytes, commit, run.id, attempt, run.path);
-          return { sha: commit, runId: run.id, distance, flags };
-        }
-      } catch (error) {
-        warning(
-          `Rejected coverage baseline from run ${run.id}: ${error instanceof Error ? error.message : 'verification error'}`,
-        );
-      }
+      const baseline = await baselineFromRun(run, commit);
+      if (baseline) return { sha: commit, runId: run.id, distance, flags: baseline };
     }
     if (distance === config.baseline.maxWalk) break;
     const { data: revision } = await api.rest.repos.getCommit({ ...event.repo, ref: commit, per_page: 1 });
