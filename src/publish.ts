@@ -62,8 +62,13 @@ function ranges(numbers: number[]): Array<[number, number]> {
 }
 
 /** Explains the patch result, including a diff that could not be verified. */
-function markdownPatch(patch: Report['patch'], completeDiff: boolean, percent: (value: number) => string) {
+function markdownPatch(
+  { patch, staleFiles }: Report,
+  completeDiff: boolean,
+  percent: (value: number) => string,
+) {
   if (!completeDiff) return 'The complete patch was unavailable.';
+  if (!patch.total && staleFiles) return `No fresh coverage for ${staleFiles} changed file(s).`;
   if (!patch.total) return 'No coverable lines changed.';
   return `**Patch ${percent(patch.percent)}** · ${patch.hit}/${patch.total} fully covered`;
 }
@@ -76,14 +81,14 @@ function markdownHeader(
   delta: (value?: number) => string,
 ) {
   const sections = ['## Mustard coverage'];
-  if (!hasUploads) sections.push('No coverage uploads found for this attempt.');
+  if (!hasUploads) sections.push(report.noCoverageMessage);
   if (report.carriedOnly)
     sections.push(
-      `No coverage uploads for this attempt. Every flag was carried forward from ${baseline?.sha.slice(0, 12)}.`,
+      `No coverage uploads for this attempt. Project coverage was carried forward from ${baseline?.sha.slice(0, 12)}.`,
     );
   if (hasUploads && showTotals) {
     sections.push(`**Project ${percent(report.project.percent)}** · ${delta(report.delta)}`);
-    if (event.base) sections.push(markdownPatch(report.patch, completeDiff, percent));
+    if (event.base) sections.push(markdownPatch(report, completeDiff, percent));
   }
   if (report.incomplete.length) {
     const names = report.incomplete.map((flag) => `**${escapeMarkdown(flag)}**`).join(', ');
@@ -139,6 +144,7 @@ function markdownChangedFiles(
 function suiteStatus(flag: string, { report, baseline }: Display) {
   if (report.carried.includes(flag)) return `Carried forward from ${baseline?.sha.slice(0, 12)}`;
   if (report.incomplete.includes(flag)) return '**Missing (required)**';
+  if (report.noData.includes(flag)) return 'No data';
   if (report.missing.includes(flag)) return 'Missing';
   return 'Uploaded';
 }
@@ -406,9 +412,12 @@ export async function publishSummary(display: Display) {
   const { report, config } = display;
   if (display.hasUploads) setOutput('project-coverage', formatPercent(report.project.percent, config));
   setOutput('project-delta', report.delta === undefined || !display.hasUploads ? '' : report.delta);
+  const hasPatchCoverage = report.patch.total > 0 || !report.staleFiles;
   setOutput(
     'patch-coverage',
-    display.event.base && display.hasUploads ? formatPercent(report.patch.percent, config) : '',
+    display.event.base && display.hasUploads && hasPatchCoverage
+      ? formatPercent(report.patch.percent, config)
+      : '',
   );
   setOutput('patch-hits', report.patch.hit);
   setOutput('patch-total', report.patch.total);

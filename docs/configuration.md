@@ -66,12 +66,15 @@ sources and tests are unchanged when skipped. `status: true` enables the
 corresponding project-style `mustard/flag/api` check.
 
 A run with no uploads, such as a PR that changes no tested paths, still looks up
-the baseline when any flag uses carryforward. If every configured flag carries
-forward, Mustard reports the carried coverage and does not count the run as
-missing uploads, so `require_uploads: true` works with path-filtered jobs. The
-patch check fails if a changed file is measured only by carried-forward
-coverage, because that file's test job did not run. If any configured flag
-cannot carry forward, the run counts as having no uploads.
+the baseline when any flag uses carryforward. With `require_uploads: true`, at
+least one flag must carry usable coverage. Optional carryforward flags with no
+baseline data appear as **No data** and do not block the run. A missing flag
+without carryforward still counts against the upload requirement. If no verified
+baseline is available, a default-branch run must publish one first.
+
+Patch coverage uses fresh uploads. A patch check fails if a file with changed
+lines is measured only by carried-forward coverage within that check's flags and
+paths. Carried-forward coverage still contributes to project totals.
 
 `required: true` marks the report incomplete when that flag has no upload for
 the attempt. Checks without a `flags` filter, and checks filtered to the missing

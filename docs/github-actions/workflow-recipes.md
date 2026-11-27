@@ -114,12 +114,16 @@ flags:
   web: { paths: [packages/web/**], carryforward: true }
 ```
 
-A skipped package's coverage comes from the baseline. When a PR skips every test
-job, the report still runs and carries every flag forward. Keep the report job's
-`if: always() && !cancelled()` so it runs after skipped jobs. A new package
-whose report has no coverable lines yet, such as one with only an empty
-`__init__.py`, fails the upload by default. Set `if-empty: warn` on its upload
-step to skip the upload instead.
+A skipped package's project coverage comes from the baseline. When a PR skips
+every test job, the report still runs and uses the available carried coverage.
+Keep the report job's `if: always() && !cancelled()` so it runs after skipped
+jobs. A new package whose report has no coverable lines yet, such as one with
+only an empty `__init__.py`, fails the upload by default. Set `if-empty: warn`
+on its upload step to skip the upload instead. An optional carryforward flag
+with no data in the baseline shows as **No data**. With `require_uploads: true`,
+an all-skipped run still needs a verified baseline with usable coverage for at
+least one flag. Run the relevant test jobs whenever a covered package's source
+changes so the patch check gets fresh coverage.
 
 ## Separate PR and push workflows
 

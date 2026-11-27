@@ -5,6 +5,7 @@ import { context, getOctokit } from '@actions/github';
 import { gz, loadUploads, names, putArtifact, reportArtifactName } from './artifacts.ts';
 import type { Names } from './artifacts.ts';
 import { findBaseline, protectedBranch, signReport } from './baseline.ts';
+import { carriesForward } from './config.ts';
 import { schema, serialize, totals } from './coverage.ts';
 import { checkoutDiff, getDiff } from './diff.ts';
 import { publishBadge, uploadHtml } from './extras.ts';
@@ -16,11 +17,6 @@ import type { Config } from './config.ts';
 import type { Event, GitHub } from './github.ts';
 import { retention, upload } from './upload.ts';
 import pkg from '../package.json' with { type: 'json' };
-
-/** Reports whether any flag can take coverage from the baseline when its job did not upload. */
-function carriesForward(config: Config) {
-  return config.defaultCarryforward || [...config.flags.values()].some((flag) => flag.carryforward);
-}
 
 /** Selects the merge base or the first parent of a push that uses carryforward. */
 async function findBaselineStart(api: GitHub, event: Event, base: string | undefined, config: Config) {
@@ -184,7 +180,7 @@ async function reportCoverage(
   info(
     `Read ${uploads.size} coverage flag(s) and ${diff.size} changed file(s) in ${Math.round((Date.now() - started) / 1000)}s`,
   );
-  // A run whose jobs were all skipped by path filters can still carry every flag forward.
+  // A run whose jobs were all skipped by path filters can still use baseline coverage.
   const wantsBaseline = uploads.size > 0 || carriesForward(config);
   const baselineStart = wantsBaseline ? await findBaselineStart(api, event, base, config) : undefined;
   const baseline = baselineStart
