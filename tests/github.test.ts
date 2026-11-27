@@ -832,7 +832,7 @@ test('summarizes global coverage first, then a row per flag, and explains a miss
   });
   assert.match(
     both,
-    /^1 Mustard coverage check\(s\) failed[^]*did not report: cpp\.\n- mustard\/project: Incomplete/,
+    /^1 Mustard coverage check\(s\) failed[\s\S]*did not report: cpp\.\n- mustard\/project: Incomplete/,
   );
   assert.doesNotMatch(both, /lack full coverage/);
 });
