@@ -321,6 +321,7 @@ comment: {layout: 'header, files'}
     paths: ['src/backend/**'],
     carryforward: true,
     status: true,
+    required: false,
   });
   assert.equal(config.flags.get('frontend')?.carryforward, false);
   assert.deepEqual(
@@ -439,4 +440,91 @@ component_management:
     config,
   );
   assert.deepEqual([...ignored.files.keys()], ['src/a.ts']);
+});
+
+test('mixed Cobertura and LCOV flags merge into one global result by repository path and line', () => {
+  const python = parseCoverage(fixture('coverage.xml'));
+  const cpp = parseCoverage(fixture('lcov.info'));
+  const config = readConfig('flags: {python: {required: true}, cpp: {required: true}}');
+  const report = compute(
+    new Map([
+      ['python', python],
+      ['cpp', cpp],
+    ]),
+    new Map([['src/example.ts', { lines: new Set([2, 4]) }]]),
+    config,
+  );
+  assert.deepEqual(report.incomplete, []);
+  assert.deepEqual([...report.flagTotals.keys()], ['python', 'cpp']);
+  assert.deepEqual([report.project.hit, report.project.partial, report.project.total], [0, 2, 4]);
+  assert.equal(report.flagPatch.get('python')?.total, 0);
+  assert.deepEqual([report.flagPatch.get('cpp')?.total, report.patch.total], [2, 2]);
+
+  // Two suites that measure the same line count it once and combine their hits.
+  const shared = (hits: number) => deserialize({ 'src/shared.c': { lines: { 1: [hits], 2: [0] } } });
+  const overlap = compute(
+    new Map([
+      ['python', shared(1)],
+      ['cpp', shared(0)],
+    ]),
+    new Map(),
+    readConfig(),
+  );
+  assert.deepEqual([overlap.project.hit, overlap.project.total], [1, 2]);
+});
+
+test('a missing required flag makes unfiltered checks incomplete even when the reported suite is higher', () => {
+  const config = readConfig(`
+flags:
+  python: {required: true}
+  cpp: {required: true, status: true}
+  docs: {}
+coverage:
+  status:
+    project:
+      default: {target: 50%}
+      python: {target: 50%, flags: [python]}
+    patch:
+      default: {informational: true}
+`);
+  const python = deserialize({ 'src/app.py': { lines: { 1: [1], 2: [1] } } });
+  const report = compute(
+    new Map([['python', python]]),
+    new Map([['src/app.py', { lines: new Set([1]) }]]),
+    config,
+  );
+  assert.deepEqual(report.missing, ['cpp', 'docs']);
+  assert.deepEqual(report.incomplete, ['cpp']);
+  assert.equal(report.project.percent, 100);
+  const result = Object.fromEntries(report.checks.map((check) => [check.name, check]));
+  assert.equal(result.project.conclusion, 'failure');
+  assert.match(result.project.message, /Incomplete: required flag\(s\) cpp did not report/);
+  assert.equal(result['project/python'].conclusion, 'success');
+  assert.equal(result['flag/cpp'].conclusion, 'failure');
+  assert.equal(result.patch.conclusion, 'neutral');
+
+  // Without any uploads the required flags still fail, even with require_uploads off.
+  const empty = compute(new Map(), new Map(), config);
+  assert.deepEqual(empty.incomplete, ['python', 'cpp']);
+  assert.equal(empty.checks.find((check) => check.name === 'project')?.conclusion, 'failure');
+});
+
+test('optional missing flags keep their behavior and carried-forward coverage satisfies a required flag', () => {
+  const python = deserialize({ 'src/app.py': { lines: { 1: [1] } } });
+  const cpp = deserialize({ 'windows/a.cpp': { lines: { 1: [0] } } });
+  const optional = compute(new Map([['python', python]]), new Map(), readConfig('flags: {cpp: {}}'));
+  assert.deepEqual([optional.missing, optional.incomplete], [['cpp'], []]);
+  assert.equal(optional.checks[0].conclusion, 'neutral');
+
+  const config = readConfig('flags: {cpp: {required: true, carryforward: true}}');
+  const carried = compute(new Map([['python', python]]), new Map(), config, new Map([['cpp', cpp]]));
+  assert.deepEqual([carried.carried, carried.incomplete], [['cpp'], []]);
+  assert.equal(carried.project.total, 2);
+  const fresh = compute(new Map([['python', python]]), new Map(), config);
+  assert.deepEqual(fresh.incomplete, ['cpp']);
+  assert.equal(
+    readConfig('flag_management: {individual_flags: [{name: cpp, required: true}]}').flags.get('cpp')
+      ?.required,
+    true,
+  );
 });

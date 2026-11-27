@@ -152198,7 +152198,8 @@ function flagConfig(root) {
     flags.set(name, {
       paths: list(rule.paths),
       carryforward: bool(rule.carryforward, bool(defaults2.carryforward)),
-      status: bool(rule.status)
+      status: bool(rule.status),
+      required: bool(rule.required)
     });
   }
   for (const [name, raw] of Object.entries(object(root.flags))) {
@@ -152207,7 +152208,8 @@ function flagConfig(root) {
     flags.set(slug(name), {
       paths: rule.paths === void 0 ? existing?.paths ?? [] : list(rule.paths),
       carryforward: bool(rule.carryforward, existing?.carryforward ?? bool(defaults2.carryforward)),
-      status: bool(rule.status, existing?.status)
+      status: bool(rule.status, existing?.status),
+      required: bool(rule.required, existing?.required)
     });
   }
   return flags;
@@ -152261,10 +152263,10 @@ var recognized = {
   coverage: ["precision", "round", "range", "status"],
   "coverage.status": ["project", "patch"],
   "coverage.status.*.*": ["target", "threshold", "informational", "if_no_baseline", "paths", "flags"],
-  "flags.*": ["paths", "carryforward", "status"],
+  "flags.*": ["paths", "carryforward", "status", "required"],
   flag_management: ["default_rules", "individual_flags"],
   "flag_management.default_rules": ["carryforward"],
-  "flag_management.individual_flags.*": ["name", "paths", "carryforward", "status"],
+  "flag_management.individual_flags.*": ["name", "paths", "carryforward", "status", "required"],
   component_management: ["individual_components"],
   "component_management.individual_components.*": ["component_id", "name", "paths", "statuses"],
   "component_management.individual_components.*.statuses.*": [
@@ -152872,6 +152874,7 @@ function matchesAttestation(entry, verifier, policy, name, digest) {
 }
 async function findBaseline(api, event, start, token, config, namespace) {
   const provenance = new Provenance(api, event, config);
+  const required = [...config.flags].filter(([, flag]) => flag.required).map(([name]) => name);
   async function baselineFromRun(run, commit2) {
     try {
       if (!run.head_branch || !await protectedBranch(api, event, run.head_branch)) return;
@@ -152883,7 +152886,13 @@ async function findBaseline(api, event, start, token, config, namespace) {
         const { bytes, digest } = await downloadArtifact(event.repo, artifact, token);
         const unattested = artifacts.some((entry) => entry.name === unattestedName(name) && !entry.expired);
         await provenance.verify(name, digest, run, attempt, unattested);
-        return await readBaseline(bytes, commit2, run.id, attempt, run.path);
+        const flags = await readBaseline(bytes, commit2, run.id, attempt, run.path);
+        const absent = required.filter((flag) => !flags.has(flag));
+        if (!absent.length) return flags;
+        info(
+          `Skipping baseline from run ${run.id}: it has no coverage for required flag(s) ${absent.join(", ")}.`
+        );
+        return;
       }
     } catch (error2) {
       warning(`Rejected coverage baseline from run ${run.id}: ${String(error2)}`);
@@ -153102,14 +153111,23 @@ function minimumCoverage(rule, kind, baseline) {
   const target = rule.target !== "auto" ? rule.target : kind === "project" && baseline ? totals(baseline).percent : 100;
   return Math.max(0, target - rule.threshold);
 }
-function check(rule, measured, baseline, config, kind, hasUploads, completeDiff) {
+function flagList(names2) {
+  return names2.join(", ");
+}
+function unavailable(hasUploads, absent, config) {
+  if (absent.length)
+    return ["failure", `Incomplete: required flag(s) ${flagList(absent)} did not report for this attempt.`];
+  if (!hasUploads)
+    return [config.uploads ? "failure" : "neutral", "No coverage uploads found for this attempt."];
+}
+function check(rule, measured, baseline, config, kind, { hasUploads, completeDiff, absent }) {
   const make = (conclusion, message2) => ({
     name: rule.name,
     conclusion: rule.informational ? "neutral" : conclusion,
     message: message2
   });
-  if (!hasUploads)
-    return make(config.uploads ? "failure" : "neutral", "No coverage uploads found for this attempt.");
+  const missing = unavailable(hasUploads, absent, config);
+  if (missing) return make(...missing);
   if (kind === "patch" && !completeDiff) return make("failure", "The complete PR diff was unavailable.");
   const actual = totals(measured);
   if (kind === "patch" && !actual.total) return make("success", "No coverable lines changed.");
@@ -153154,7 +153172,8 @@ function prepareFlags(uploads, baseline, config) {
     } else missing.push(name);
   }
   assertBudget(flags.values());
-  return { flags, baselineFlags, carried, missing };
+  const incomplete = missing.filter((name) => config.flags.get(name)?.required);
+  return { flags, baselineFlags, carried, missing, incomplete };
 }
 function changedFiles(diff, files, patch, previous) {
   return [...diff].map(([path4, change]) => {
@@ -153186,26 +153205,24 @@ function coverageChecks(flags, baselineFlags, diff, config, {
   hasUploads,
   completeDiff,
   hasPatch,
-  hasIndirectChanges
+  hasIndirectChanges,
+  incomplete
 }) {
   const evaluate = (rule, kind, componentPaths = []) => {
     const selection = view(view(union(flags, rule.flags), rule.paths), componentPaths);
     const prior = baselineFlags ? view(view(union(baselineFlags, rule.flags), rule.paths), componentPaths) : void 0;
     const hasSelectedUploads = hasUploads && (!rule.flags.length || rule.flags.some((name) => flags.has(name)));
-    return check(
-      rule,
-      kind === "patch" ? patchFiles(selection, diff) : selection,
-      prior,
-      config,
-      kind,
-      hasSelectedUploads,
-      completeDiff
-    );
+    const absent = incomplete.filter((name) => !rule.flags.length || rule.flags.includes(name));
+    return check(rule, kind === "patch" ? patchFiles(selection, diff) : selection, prior, config, kind, {
+      hasUploads: hasSelectedUploads,
+      completeDiff,
+      absent
+    });
   };
   const projectChecks = config.project.map((rule) => evaluate(rule, "project"));
   const primary = projectChecks.find((result) => result.name === "project");
   const defaultRule = config.project.find((rule) => rule.name === "project");
-  if (config.indirectFail && primary && hasIndirectChanges && hasUploads) {
+  if (config.indirectFail && primary && hasIndirectChanges && hasUploads && !incomplete.length) {
     primary.conclusion = defaultRule?.informational ? "neutral" : "failure";
     primary.message += " Coverage changed in files outside the diff.";
   }
@@ -153236,7 +153253,7 @@ function annotatePatch(patch, patchGate, maximum) {
   return annotations;
 }
 function compute(uploads, diff, config, baseline, completeDiff = true, hasPatch = true) {
-  const { flags, baselineFlags, carried, missing } = prepareFlags(uploads, baseline, config);
+  const { flags, baselineFlags, carried, missing, incomplete } = prepareFlags(uploads, baseline, config);
   const files = union(flags);
   const previous = baseline ? union(baselineFlags) : void 0;
   const patch = patchFiles(files, diff);
@@ -153249,7 +153266,8 @@ function compute(uploads, diff, config, baseline, completeDiff = true, hasPatch 
     hasUploads: uploads.size > 0,
     completeDiff,
     hasPatch,
-    hasIndirectChanges: indirect.length > 0
+    hasIndirectChanges: indirect.length > 0,
+    incomplete
   });
   const patchTotal = totals(patch);
   const patchGate = config.annotations.enabled ? checks.find((result) => result.name === "patch") : void 0;
@@ -153259,6 +153277,7 @@ function compute(uploads, diff, config, baseline, completeDiff = true, hasPatch 
     flags,
     carried,
     missing,
+    incomplete,
     project,
     delta,
     patch: patchTotal,
@@ -153268,6 +153287,7 @@ function compute(uploads, diff, config, baseline, completeDiff = true, hasPatch 
     omittedAnnotations: patchGate ? patchTotal.total - patchTotal.hit - annotations.length : 0,
     checks,
     flagTotals: new Map([...flags].map(([name, data]) => [name, totals(data)])),
+    flagPatch: new Map([...flags].map(([name, data]) => [name, totals(patchFiles(data, diff))])),
     componentTotals: new Map(
       config.components.map((component) => [
         component.id,
@@ -153327,6 +153347,13 @@ function markdownHeader({ report, event, baseline, configChanged, hasUploads, co
     sections.push(`**Project ${percent2(report.project.percent)}** \xB7 ${delta(report.delta)}`);
     if (event.base) sections.push(markdownPatch(report.patch, completeDiff, percent2));
   }
+  if (report.incomplete.length) {
+    const names2 = report.incomplete.map((flag) => `**${escapeMarkdown(flag)}**`).join(", ");
+    sections.push(
+      `> [!WARNING]
+> **Incomplete coverage.** Required flag(s) ${names2} did not report. Global coverage only includes the suites that reported. This run does not update the badge or become a baseline.`
+    );
+  }
   if (baseline) {
     sections.push(
       `Baseline [${baseline.sha.slice(0, 12)}](${projectUrl(event)}/actions/runs/${baseline.runId})${baseline.distance ? ` \xB7 ${baseline.distance} first-parent commit(s) back` : ""}.`
@@ -153359,15 +153386,32 @@ function markdownChangedFiles({ report, config, event }, percent2, delta) {
     ...report.changed.length > rows.length ? ["", `+${report.changed.length - rows.length} more file(s).`] : []
   ].join("\n");
 }
-function markdownFlags({ report, config, baseline }, comment, percent2) {
-  const rows = [...report.flagTotals].flatMap(([flag, totals2]) => {
-    const isCarried = report.carried.includes(flag);
-    return isCarried && comment && !config.comment.carryforward ? [] : [
-      `- **${escapeMarkdown(flag)}** \xB7 ${percent2(totals2.percent)}${isCarried ? ` \xB7 carried forward from ${baseline?.sha.slice(0, 12)}` : ""}`
-    ];
+function suiteStatus(flag, { report, baseline }) {
+  if (report.carried.includes(flag)) return `Carried forward from ${baseline?.sha.slice(0, 12)}`;
+  if (report.incomplete.includes(flag)) return "**Missing (required)**";
+  if (report.missing.includes(flag)) return "Missing";
+  return "Uploaded";
+}
+function markdownFlags(display, comment, percent2) {
+  const { report, config, event } = display;
+  const flags = [...report.flagTotals.keys(), ...report.missing].filter(
+    (flag) => !(comment && !config.comment.carryforward && report.carried.includes(flag))
+  );
+  if (!flags.length) return "";
+  const rows = flags.map((flag) => {
+    const project = report.flagTotals.get(flag);
+    const patch = report.flagPatch.get(flag);
+    const patchCell = event.base && patch?.total ? percent2(patch.percent) : "\u2014";
+    const cells = project ? [percent2(project.percent), patchCell, `${project.hit}/${project.total}`] : ["\u2014", "\u2014", "\u2014"];
+    return `| ${escapeMarkdown(flag)} | ${cells.join(" | ")} | ${suiteStatus(flag, display)} |`;
   });
-  rows.push(...report.missing.map((flag) => `- **${escapeMarkdown(flag)}** \xB7 missing`));
-  return rows.length ? ["### Flags", "", ...rows].join("\n") : "";
+  return [
+    "### Flags",
+    "",
+    "| Flag | Project | Patch | Covered lines | Status |",
+    "| --- | ---: | ---: | ---: | --- |",
+    ...rows
+  ].join("\n");
 }
 function markdown(display, comment = false) {
   const { report, config, event, reportId, htmlId, outputRunId } = display;
@@ -153376,6 +153420,10 @@ function markdown(display, comment = false) {
   const layout = config.comment.layout;
   const include2 = (...keys) => !comment || !layout || keys.some((key) => layout.has(key));
   const sections = markdownHeader(display, include2("header", "reach", "diff"), percent2, delta);
+  if (include2("flags")) {
+    const section = markdownFlags(display, comment, percent2);
+    if (section) sections.push(section);
+  }
   if (report.changed.length && config.comment.maxFiles && include2("files", "diff", "reach")) {
     sections.push(markdownChangedFiles(display, percent2, delta));
   }
@@ -153384,10 +153432,6 @@ function markdown(display, comment = false) {
     if (report.indirect.length > rows.length)
       rows.push(`- +${report.indirect.length - rows.length} more file(s)`);
     sections.push(["### Indirect changes", "", ...rows].join("\n"));
-  }
-  if (include2("flags")) {
-    const section = markdownFlags(display, comment, percent2);
-    if (section) sections.push(section);
   }
   if (report.componentTotals.size && include2("components")) {
     const rows = [...report.componentTotals.values()].map(
@@ -153570,13 +153614,17 @@ async function publishSummary(display) {
   setOutput("project-status", report.checks.find((check2) => check2.name === "project")?.conclusion ?? "");
   setOutput("patch-status", report.checks.find((check2) => check2.name === "patch")?.conclusion ?? "");
   setOutput("report-artifact-id", display.reportId ?? "");
+  setOutput("missing-required-flags", report.incomplete.join(","));
 }
 function failureMessage(failed, report, prefix2, context5) {
   const uncovered = report.patch.total - report.patch.hit;
-  const lines = failed.map((check2) => {
-    const detail = check2.name === "patch" && uncovered ? ` ${uncovered} changed line(s) lack full coverage. See the check's annotations.` : "";
-    return `- ${prefix2}/${check2.name}: ${check2.message}${detail}`;
-  });
+  const lines = report.incomplete.length ? [`- Required flag(s) did not report: ${report.incomplete.join(", ")}.`] : [];
+  lines.push(
+    ...failed.map((check2) => {
+      const detail = check2.name === "patch" && uncovered ? ` ${uncovered} changed line(s) lack full coverage. See the check's annotations.` : "";
+      return `- ${prefix2}/${check2.name}: ${check2.message}${detail}`;
+    })
+  );
   const hints = [];
   if (context5.fromBase && !context5.hasConfig)
     hints.push(
@@ -153585,7 +153633,7 @@ function failureMessage(failed, report, prefix2, context5) {
   if (context5.configChanged)
     hints.push("This PR changes the coverage config, but the checks use the merge-base config.");
   return [
-    `${failed.length} Mustard coverage check(s) failed, and fail-ci is enabled:`,
+    failed.length ? `${failed.length} Mustard coverage check(s) failed, and fail-ci is enabled:` : "Mustard coverage is incomplete, and fail-ci is enabled:",
     ...lines,
     ...hints,
     "The workflow summary has the full report."
@@ -154189,6 +154237,7 @@ async function publishArtifacts(api, event, namespace, report, {
           delta: report.delta,
           flags: Object.fromEntries(report.flagTotals),
           components: Object.fromEntries(report.componentTotals),
+          missing_required_flags: report.incomplete,
           files: Object.fromEntries(
             [...report.files].map(([path4, lines]) => [path4, totals(/* @__PURE__ */ new Map([[path4, lines]])).percent])
           )
@@ -154211,7 +154260,7 @@ async function publishArtifacts(api, event, namespace, report, {
     ]),
     retention()
   );
-  if (event.branch && isProtectedSource(event, config.baseline.branches) && await protectedBranch(api, event, event.branch)) {
+  if (!report.incomplete.length && event.branch && isProtectedSource(event, config.baseline.branches) && await protectedBranch(api, event, event.branch)) {
     await signReport(api, event, name, digest, token, config, retention());
   }
   if (config.html && event.mode === "report") {
@@ -154286,16 +154335,18 @@ async function reportCoverage(api, mode, namespace, token, workspace) {
     await writeChecks(api, namespace, display);
     await stickyComment(api, namespace, display);
   }
-  if (reportId && shouldPublishBadge(config, event)) {
-    await publishBadge(api, event, config, report, namespace);
-  }
+  if (reportId && shouldPublishBadge(config, event)) await updateBadge(api, event, config, report, namespace);
   info(`Mustard finished in ${Math.round((Date.now() - started) / 1e3)}s`);
   const failed = report.checks.filter((check2) => check2.conclusion === "failure");
-  if (getBooleanInput("fail-ci") && failed.length) {
+  if (getBooleanInput("fail-ci") && (failed.length || report.incomplete.length)) {
     setFailed(
       failureMessage(failed, report, namespace.check, { fromBase, hasConfig: !!text, configChanged })
     );
   }
+}
+async function updateBadge(api, event, config, report, namespace) {
+  if (report.incomplete.length) info("Skipping the badge because required coverage flags are missing.");
+  else await publishBadge(api, event, config, report, namespace);
 }
 main().catch(
   (error2) => setFailed(error2 instanceof Error ? error2.message : "Mustard failed with an unexpected error")

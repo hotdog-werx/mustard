@@ -81,6 +81,12 @@ function markdownHeader(
     sections.push(`**Project ${percent(report.project.percent)}** · ${delta(report.delta)}`);
     if (event.base) sections.push(markdownPatch(report.patch, completeDiff, percent));
   }
+  if (report.incomplete.length) {
+    const names = report.incomplete.map((flag) => `**${escapeMarkdown(flag)}**`).join(', ');
+    sections.push(
+      `> [!WARNING]\n> **Incomplete coverage.** Required flag(s) ${names} did not report. Global coverage only includes the suites that reported. This run does not update the badge or become a baseline.`,
+    );
+  }
   if (baseline) {
     sections.push(
       `Baseline [${baseline.sha.slice(0, 12)}](${projectUrl(event)}/actions/runs/${baseline.runId})${baseline.distance ? ` · ${baseline.distance} first-parent commit(s) back` : ''}.`,
@@ -125,21 +131,37 @@ function markdownChangedFiles(
   ].join('\n');
 }
 
-function markdownFlags(
-  { report, config, baseline }: Display,
-  comment: boolean,
-  percent: (value: number) => string,
-) {
-  const rows = [...report.flagTotals].flatMap(([flag, totals]) => {
-    const isCarried = report.carried.includes(flag);
-    return isCarried && comment && !config.comment.carryforward
-      ? []
-      : [
-          `- **${escapeMarkdown(flag)}** · ${percent(totals.percent)}${isCarried ? ` · carried forward from ${baseline?.sha.slice(0, 12)}` : ''}`,
-        ];
+/** Describes where a suite's coverage came from in this report. */
+function suiteStatus(flag: string, { report, baseline }: Display) {
+  if (report.carried.includes(flag)) return `Carried forward from ${baseline?.sha.slice(0, 12)}`;
+  if (report.incomplete.includes(flag)) return '**Missing (required)**';
+  if (report.missing.includes(flag)) return 'Missing';
+  return 'Uploaded';
+}
+
+/** Tabulates each flag's project and patch coverage with its upload status. */
+function markdownFlags(display: Display, comment: boolean, percent: (value: number) => string) {
+  const { report, config, event } = display;
+  const flags = [...report.flagTotals.keys(), ...report.missing].filter(
+    (flag) => !(comment && !config.comment.carryforward && report.carried.includes(flag)),
+  );
+  if (!flags.length) return '';
+  const rows = flags.map((flag) => {
+    const project = report.flagTotals.get(flag);
+    const patch = report.flagPatch.get(flag);
+    const patchCell = event.base && patch?.total ? percent(patch.percent) : '—';
+    const cells = project
+      ? [percent(project.percent), patchCell, `${project.hit}/${project.total}`]
+      : ['—', '—', '—'];
+    return `| ${escapeMarkdown(flag)} | ${cells.join(' | ')} | ${suiteStatus(flag, display)} |`;
   });
-  rows.push(...report.missing.map((flag) => `- **${escapeMarkdown(flag)}** · missing`));
-  return rows.length ? ['### Flags', '', ...rows].join('\n') : '';
+  return [
+    '### Flags',
+    '',
+    '| Flag | Project | Patch | Covered lines | Status |',
+    '| --- | ---: | ---: | ---: | --- |',
+    ...rows,
+  ].join('\n');
 }
 
 /** Builds the coverage summary or PR comment, honoring layout settings and size limits. */
@@ -153,6 +175,10 @@ export function markdown(display: Display, comment = false): string {
   const layout = config.comment.layout;
   const include = (...keys: string[]) => !comment || !layout || keys.some((key) => layout.has(key));
   const sections = markdownHeader(display, include('header', 'reach', 'diff'), percent, delta);
+  if (include('flags')) {
+    const section = markdownFlags(display, comment, percent);
+    if (section) sections.push(section);
+  }
   if (report.changed.length && config.comment.maxFiles && include('files', 'diff', 'reach')) {
     sections.push(markdownChangedFiles(display, percent, delta));
   }
@@ -163,10 +189,6 @@ export function markdown(display: Display, comment = false): string {
     if (report.indirect.length > rows.length)
       rows.push(`- +${report.indirect.length - rows.length} more file(s)`);
     sections.push(['### Indirect changes', '', ...rows].join('\n'));
-  }
-  if (include('flags')) {
-    const section = markdownFlags(display, comment, percent);
-    if (section) sections.push(section);
   }
   if (report.componentTotals.size && include('components')) {
     const rows = [...report.componentTotals.values()].map(
@@ -390,6 +412,7 @@ export async function publishSummary(display: Display) {
   setOutput('project-status', report.checks.find((check) => check.name === 'project')?.conclusion ?? '');
   setOutput('patch-status', report.checks.find((check) => check.name === 'patch')?.conclusion ?? '');
   setOutput('report-artifact-id', display.reportId ?? '');
+  setOutput('missing-required-flags', report.incomplete.join(','));
 }
 
 /** Explains which coverage gates failed and whether the merge-base policy affected the result. */
@@ -401,13 +424,18 @@ export function failureMessage(
   context: { fromBase: boolean; hasConfig: boolean; configChanged: boolean },
 ): string {
   const uncovered = report.patch.total - report.patch.hit;
-  const lines = failed.map((check) => {
-    const detail =
-      check.name === 'patch' && uncovered
-        ? ` ${uncovered} changed line(s) lack full coverage. See the check's annotations.`
-        : '';
-    return `- ${prefix}/${check.name}: ${check.message}${detail}`;
-  });
+  const lines = report.incomplete.length
+    ? [`- Required flag(s) did not report: ${report.incomplete.join(', ')}.`]
+    : [];
+  lines.push(
+    ...failed.map((check) => {
+      const detail =
+        check.name === 'patch' && uncovered
+          ? ` ${uncovered} changed line(s) lack full coverage. See the check's annotations.`
+          : '';
+      return `- ${prefix}/${check.name}: ${check.message}${detail}`;
+    }),
+  );
   const hints = [];
   if (context.fromBase && !context.hasConfig)
     hints.push(
@@ -416,7 +444,9 @@ export function failureMessage(
   if (context.configChanged)
     hints.push('This PR changes the coverage config, but the checks use the merge-base config.');
   return [
-    `${failed.length} Mustard coverage check(s) failed, and fail-ci is enabled:`,
+    failed.length
+      ? `${failed.length} Mustard coverage check(s) failed, and fail-ci is enabled:`
+      : 'Mustard coverage is incomplete, and fail-ci is enabled:',
     ...lines,
     ...hints,
     'The workflow summary has the full report.',

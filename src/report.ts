@@ -47,6 +47,23 @@ function minimumCoverage(rule: Gate, kind: 'project' | 'patch', baseline: Files 
   return Math.max(0, target - rule.threshold);
 }
 
+/** Lists flag names for check messages, which GitHub renders as plain text. */
+export function flagList(names: string[]): string {
+  return names.join(', ');
+}
+
+/** Explains a gate that cannot be measured because its required or selected uploads are absent. */
+function unavailable(
+  hasUploads: boolean,
+  absent: string[],
+  config: Config,
+): [Conclusion, string] | undefined {
+  if (absent.length)
+    return ['failure', `Incomplete: required flag(s) ${flagList(absent)} did not report for this attempt.`];
+  if (!hasUploads)
+    return [config.uploads ? 'failure' : 'neutral', 'No coverage uploads found for this attempt.'];
+}
+
 /** Evaluates one coverage gate, including no-upload, no-baseline, and incomplete-diff cases. */
 function check(
   rule: Gate,
@@ -54,16 +71,15 @@ function check(
   baseline: Files | undefined,
   config: Config,
   kind: 'project' | 'patch',
-  hasUploads: boolean,
-  completeDiff: boolean,
+  { hasUploads, completeDiff, absent }: { hasUploads: boolean; completeDiff: boolean; absent: string[] },
 ): Check {
   const make = (conclusion: Conclusion, message: string) => ({
     name: rule.name,
     conclusion: rule.informational ? ('neutral' as const) : conclusion,
     message,
   });
-  if (!hasUploads)
-    return make(config.uploads ? 'failure' : 'neutral', 'No coverage uploads found for this attempt.');
+  const missing = unavailable(hasUploads, absent, config);
+  if (missing) return make(...missing);
   if (kind === 'patch' && !completeDiff) return make('failure', 'The complete PR diff was unavailable.');
   const actual = totals(measured);
   if (kind === 'patch' && !actual.total) return make('success', 'No coverable lines changed.');
@@ -116,7 +132,9 @@ function prepareFlags(uploads: FlagFiles, baseline: FlagFiles | undefined, confi
     } else missing.push(name);
   }
   assertBudget(flags.values());
-  return { flags, baselineFlags, carried, missing };
+  // Carried-forward coverage satisfies a required flag; only a flag with no data makes the run incomplete.
+  const incomplete = missing.filter((name) => config.flags.get(name)?.required);
+  return { flags, baselineFlags, carried, missing, incomplete };
 }
 
 /** Describes measured patches and compares renamed files to their previous paths. */
@@ -167,11 +185,13 @@ function coverageChecks(
     completeDiff,
     hasPatch,
     hasIndirectChanges,
+    incomplete,
   }: {
     hasUploads: boolean;
     completeDiff: boolean;
     hasPatch: boolean;
     hasIndirectChanges: boolean;
+    incomplete: string[];
   },
 ) {
   const evaluate = (rule: Gate, kind: 'project' | 'patch', componentPaths: string[] = []) => {
@@ -181,20 +201,18 @@ function coverageChecks(
       : undefined;
     const hasSelectedUploads =
       hasUploads && (!rule.flags.length || rule.flags.some((name) => flags.has(name)));
-    return check(
-      rule,
-      kind === 'patch' ? patchFiles(selection, diff) : selection,
-      prior,
-      config,
-      kind,
-      hasSelectedUploads,
+    // A gate without a flag filter measures every suite, so any missing required suite makes it incomplete.
+    const absent = incomplete.filter((name) => !rule.flags.length || rule.flags.includes(name));
+    return check(rule, kind === 'patch' ? patchFiles(selection, diff) : selection, prior, config, kind, {
+      hasUploads: hasSelectedUploads,
       completeDiff,
-    );
+      absent,
+    });
   };
   const projectChecks = config.project.map((rule) => evaluate(rule, 'project'));
   const primary = projectChecks.find((result) => result.name === 'project');
   const defaultRule = config.project.find((rule) => rule.name === 'project');
-  if (config.indirectFail && primary && hasIndirectChanges && hasUploads) {
+  if (config.indirectFail && primary && hasIndirectChanges && hasUploads && !incomplete.length) {
     primary.conclusion = defaultRule?.informational ? 'neutral' : 'failure';
     primary.message += ' Coverage changed in files outside the diff.';
   }
@@ -241,7 +259,7 @@ export function compute(
   completeDiff = true,
   hasPatch = true,
 ) {
-  const { flags, baselineFlags, carried, missing } = prepareFlags(uploads, baseline, config);
+  const { flags, baselineFlags, carried, missing, incomplete } = prepareFlags(uploads, baseline, config);
   const files = union(flags);
   const previous = baseline ? union(baselineFlags) : undefined;
   const patch = patchFiles(files, diff);
@@ -255,6 +273,7 @@ export function compute(
     completeDiff,
     hasPatch,
     hasIndirectChanges: indirect.length > 0,
+    incomplete,
   });
   const patchTotal = totals(patch);
   const patchGate = config.annotations.enabled ? checks.find((result) => result.name === 'patch') : undefined;
@@ -264,6 +283,7 @@ export function compute(
     flags,
     carried,
     missing,
+    incomplete,
     project,
     delta,
     patch: patchTotal,
@@ -273,6 +293,7 @@ export function compute(
     omittedAnnotations: patchGate ? patchTotal.total - patchTotal.hit - annotations.length : 0,
     checks,
     flagTotals: new Map([...flags].map(([name, data]) => [name, totals(data)])),
+    flagPatch: new Map([...flags].map(([name, data]) => [name, totals(patchFiles(data, diff))])),
     componentTotals: new Map(
       config.components.map((component) => [
         component.id,

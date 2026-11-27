@@ -47,14 +47,15 @@ Pass the same `name` when uploading or consuming reports for a namespace. For
 `report` and `comment` expose the outputs below. Assign an `id` to the action
 step to reference them in the same job.
 
-| Output               | Value                                                                                                  |
-| -------------------- | ------------------------------------------------------------------------------------------------------ |
-| `project-coverage`   | Project coverage as a percentage. Empty without uploads.                                               |
-| `project-delta`      | Project coverage difference from the baseline, in percentage points. Empty when it cannot be computed. |
-| `patch-coverage`     | Coverage of changed coverable lines as a percentage. Empty for pushes or without uploads.              |
-| `patch-hits`         | Number of fully covered changed lines.                                                                 |
-| `patch-total`        | Number of changed coverable lines.                                                                     |
-| `baseline-sha`       | Commit SHA of the verified baseline, if available.                                                     |
-| `project-status`     | Conclusion of the default project check, if configured.                                                |
-| `patch-status`       | Conclusion of the default patch check, if configured for the event.                                    |
-| `report-artifact-id` | GitHub Actions artifact ID of the normalized coverage report, if published.                            |
+| Output                   | Value                                                                                                  |
+| ------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `project-coverage`       | Project coverage as a percentage. Empty without uploads.                                               |
+| `project-delta`          | Project coverage difference from the baseline, in percentage points. Empty when it cannot be computed. |
+| `patch-coverage`         | Coverage of changed coverable lines as a percentage. Empty for pushes or without uploads.              |
+| `patch-hits`             | Number of fully covered changed lines.                                                                 |
+| `patch-total`            | Number of changed coverable lines.                                                                     |
+| `baseline-sha`           | Commit SHA of the verified baseline, if available.                                                     |
+| `project-status`         | Conclusion of the default project check, if configured.                                                |
+| `patch-status`           | Conclusion of the default patch check, if configured for the event.                                    |
+| `report-artifact-id`     | GitHub Actions artifact ID of the normalized coverage report, if published.                            |
+| `missing-required-flags` | Comma-separated required flags with no upload or carried-forward coverage. Empty when complete.        |

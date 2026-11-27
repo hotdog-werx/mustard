@@ -61,6 +61,8 @@ outputs:
     description: Conclusion of the default patch check.
   report-artifact-id:
     description: GitHub Actions artifact ID for the normalized report.
+  missing-required-flags:
+    description: Comma-separated required flags with no fresh or carried-forward coverage. Empty when coverage is complete.
 runs:
   using: node24
   main: dist/index.cjs

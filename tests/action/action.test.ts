@@ -304,7 +304,7 @@ test('a push carries forward a missing flag from the first parent and records it
   ok(fixture.run({ mode: 'upload', files: 'lcov.info', flag: 'unit' }, next));
   const report = ok(fixture.run({}, next));
   assert.equal(report.outputs['baseline-sha'], base);
-  assert.match(report.summary, /integration.*100\.00%.*carried forward from a{12}/);
+  assert.match(report.summary, /integration.*100\.00%.*Carried forward from a{12}/);
   assert.match(report.summary, /unit.*66\.66%/);
   const archive = await fixture.inspect(Number(report.outputs['report-artifact-id']), [
     'meta.json',
@@ -573,6 +573,33 @@ component_management:
     ref: 'refs/heads/mustard-badges',
     sha: 'badge-commit',
   });
+});
+
+test('an incomplete push fails CI with neutral checks, keeps the last badge, and signs no baseline', (t) => {
+  const fixture = scenario(t);
+  fixture.writeCoverage(fullCoverage);
+  const push = {
+    MUSTARD_TEST_EVENT: 'push',
+    MUSTARD_TEST_SIGN: 'true',
+    // Informational checks stay neutral, so only the incomplete report fails the step.
+    MUSTARD_TEST_CONFIG_SUFFIX:
+      '\nbadge: {enabled: true}\nflags: {default: {required: true}, cpp: {required: true}}\ncoverage: {status: {project: {default: {informational: true}}}}\n',
+  };
+  ok(fixture.run({ mode: 'upload', files: 'lcov.info' }, push));
+  const report = fixture.run({ 'fail-ci': 'true' }, push);
+  assert.equal(report.status, 1, report.diagnostics);
+  assert.match(report.stdout, /Required flag\(s\) did not report: cpp/);
+  assert.equal(report.outputs['missing-required-flags'], 'cpp');
+  assert.equal(report.outputs['project-status'], 'neutral');
+  assert.match(report.stdout, /Mustard coverage is incomplete, and fail-ci is enabled/);
+  assert.equal(report.outputs['project-coverage'], '100.00%');
+  assert.match(report.summary, /Incomplete coverage/);
+  const { archives, calls } = fixture.state();
+  assert.ok(archives.some((archive) => archive.name === `mustard-report-${base}`));
+  assert.equal(
+    calls.some(({ route }) => route === '/git/trees' || route === '/attestations'),
+    false,
+  );
 });
 
 test('a named coverage report uses its own badge branch', (t) => {

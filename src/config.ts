@@ -13,7 +13,7 @@ export type Gate = {
   paths: string[];
   flags: string[];
 };
-type Flag = { paths: string[]; carryforward: boolean; status: boolean };
+type Flag = { paths: string[]; carryforward: boolean; status: boolean; required: boolean };
 type Component = {
   id: string;
   name: string;
@@ -146,6 +146,7 @@ function flagConfig(root: Record<string, unknown>): Map<string, Flag> {
       paths: list(rule.paths),
       carryforward: bool(rule.carryforward, bool(defaults.carryforward)),
       status: bool(rule.status),
+      required: bool(rule.required),
     });
   }
   for (const [name, raw] of Object.entries(object(root.flags))) {
@@ -155,6 +156,7 @@ function flagConfig(root: Record<string, unknown>): Map<string, Flag> {
       paths: rule.paths === undefined ? (existing?.paths ?? []) : list(rule.paths),
       carryforward: bool(rule.carryforward, existing?.carryforward ?? bool(defaults.carryforward)),
       status: bool(rule.status, existing?.status),
+      required: bool(rule.required, existing?.required),
     });
   }
   return flags;
@@ -211,10 +213,10 @@ const recognized: Record<string, string[]> = {
   coverage: ['precision', 'round', 'range', 'status'],
   'coverage.status': ['project', 'patch'],
   'coverage.status.*.*': ['target', 'threshold', 'informational', 'if_no_baseline', 'paths', 'flags'],
-  'flags.*': ['paths', 'carryforward', 'status'],
+  'flags.*': ['paths', 'carryforward', 'status', 'required'],
   flag_management: ['default_rules', 'individual_flags'],
   'flag_management.default_rules': ['carryforward'],
-  'flag_management.individual_flags.*': ['name', 'paths', 'carryforward', 'status'],
+  'flag_management.individual_flags.*': ['name', 'paths', 'carryforward', 'status', 'required'],
   component_management: ['individual_components'],
   'component_management.individual_components.*': ['component_id', 'name', 'paths', 'statuses'],
   'component_management.individual_components.*.statuses.*': [

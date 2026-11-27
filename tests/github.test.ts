@@ -695,12 +695,12 @@ comment: {layout: flags, show_carryforward_flags: false}
   };
   const comment = markdown(display, true);
   assert.doesNotMatch(comment, /\*\*Project \d/);
-  assert.match(comment, /\*\*unit\*\* · 100\.00%/);
-  assert.match(comment, /\*\*missing\*\* · missing/);
-  assert.doesNotMatch(comment, /\*\*integration\*\*/);
+  assert.match(comment, /\| unit \| 100\.00% \| — \| 1\/1 \| Uploaded \|/);
+  assert.match(comment, /\| missing \| — \| — \| — \| Missing \|/);
+  assert.doesNotMatch(comment, /integration/);
   const summary = markdown(display);
   assert.match(summary, /\*\*Project 100\.00%/);
-  assert.match(summary, /\*\*integration\*\* · 100\.00% · carried forward from a{12}/);
+  assert.match(summary, /\| integration \| 100\.00% \| — \| 1\/1 \| Carried forward from a{12} \|/);
 });
 
 test('explains indirect coverage regressions separately from changed files', () => {
@@ -804,4 +804,67 @@ exec ${shellQuote(actualGit)} "$@"
     if (previousServer === undefined) delete process.env.GITHUB_SERVER_URL;
     else process.env.GITHUB_SERVER_URL = previousServer;
   }
+});
+
+test('summarizes global coverage first, then a row per flag, and explains a missing required flag', () => {
+  const config = readConfig('flags: {python: {required: true}, cpp: {required: true}}');
+  const files = deserialize({ 'src/app.py': { lines: { 1: [1], 2: [0] } } });
+  const report = compute(new Map([['python', files]]), new Map(), config);
+  const body = markdown({ report, config, event, configChanged: false, hasUploads: true }, true);
+  assert.ok(body.indexOf('**Project 50.00%**') < body.indexOf('### Flags'));
+  assert.match(body, /\*\*Incomplete coverage\.\*\* Required flag\(s\) \*\*cpp\*\* did not report/);
+  assert.match(body, /\| python \| 50\.00% \| — \| 1\/2 \| Uploaded \|/);
+  assert.match(body, /\| cpp \| — \| — \| — \| \*\*Missing \(required\)\*\* \|/);
+  const message = failureMessage([], report, 'mustard', {
+    fromBase: false,
+    hasConfig: true,
+    configChanged: false,
+  });
+  assert.match(
+    message,
+    /^Mustard coverage is incomplete, and fail-ci is enabled:\n- Required flag\(s\) did not report: cpp\./,
+  ); // A failing non-patch check is listed after the missing flags without the uncovered-lines hint.
+  const project = report.checks.filter((check) => check.name === 'project');
+  const both = failureMessage(project, report, 'mustard', {
+    fromBase: false,
+    hasConfig: true,
+    configChanged: false,
+  });
+  assert.match(
+    both,
+    /^1 Mustard coverage check\(s\) failed[\s\S]*did not report: cpp\.\n- mustard\/project: Incomplete/,
+  );
+  assert.doesNotMatch(both, /lack full coverage/);
+});
+
+test('baseline lookup skips a report that lacks a required flag', async (t) => {
+  const bytes = fixture('report.zip');
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  const api = {
+    rest: {
+      actions: { listWorkflowRunsForRepo: async () => ({ data: { workflow_runs: [run] } }) },
+      repos: { getBranch: async () => ({ data: { protected: true } }) },
+    },
+    paginate: {
+      iterator: async function* () {
+        yield {
+          data: [
+            {
+              id: 11,
+              name: `mustard-report-${base}`,
+              expired: false,
+              size_in_bytes: bytes.length,
+              digest: `sha256:${digest}`,
+            },
+          ],
+        };
+      },
+    },
+  } as unknown as GitHub;
+  t.mock.method(globalThis, 'fetch', async () => new Response(new Uint8Array(bytes)));
+  const settings = 'baseline: {attestations: off, max_walk: 0}';
+  const complete = await findBaseline(api, event, base, 'example', readConfig(settings), names(''));
+  assert.equal(complete?.runId, 7);
+  const partial = readConfig(`${settings}\nflags: {cpp: {required: true}}`);
+  assert.equal(await findBaseline(api, event, base, 'example', partial, names('')), undefined);
 });

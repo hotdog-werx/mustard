@@ -69,6 +69,10 @@
           },
           "status": {
             "type": "boolean"
+          },
+          "required": {
+            "type": "boolean",
+            "description": "Mark global coverage incomplete when this flag has neither a fresh upload nor carried-forward coverage."
           }
         }
       }
@@ -103,6 +107,10 @@
               },
               "status": {
                 "type": "boolean"
+              },
+              "required": {
+                "type": "boolean",
+                "description": "Mark global coverage incomplete when this flag has neither a fresh upload nor carried-forward coverage."
               }
             }
           }
