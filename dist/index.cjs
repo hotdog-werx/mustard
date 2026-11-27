@@ -154315,7 +154315,7 @@ async function publishBadge(api, event, config, report, namespace) {
 // package.json
 var package_default = {
   name: "mustard",
-  version: "0.1.1",
+  version: "0.2.0",
   private: true,
   type: "module",
   engines: {

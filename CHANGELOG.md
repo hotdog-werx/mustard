@@ -1,3 +1,15 @@
+## [0.2.0] - 2026-11-27
+
+### 🚀 Features
+
+- Add required coverage flags for multi-suite reports (#5) by
+  [@jamestrousdale](https://github.com/jamestrousdale) in
+  [#5](https://github.com/hotdog-werx/mustard/pull/5)
+
+- Support path-filtered monorepos and merge checkouts (#7) by
+  [@jamestrousdale](https://github.com/jamestrousdale) in
+  [#7](https://github.com/hotdog-werx/mustard/pull/7)
+
 ## [0.1.1] - 2026-11-26
 
 ### 🐛 Bug Fixes

@@ -4,10 +4,12 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
+import { crc32, gzipSync } from 'node:zlib';
 import { mock, test } from 'node:test';
 import {
   checkoutRemapper,
   downloadArtifact,
+  loadUploads,
   names,
   readBaseline,
   readZip,
@@ -43,7 +45,7 @@ import {
   writeChecks,
 } from '../src/publish.ts';
 import { compute } from '../src/report.ts';
-import { deserialize, serialize } from '../src/coverage.ts';
+import { deserialize, maxBytes, schema, serialize } from '../src/coverage.ts';
 
 const head = 'b'.repeat(40);
 const base = 'a'.repeat(40);
@@ -953,4 +955,78 @@ test("validates an upload's recorded checkout and diffs each checkout once", asy
   await assert.rejects(remap(files, '4'.repeat(40)), /too many test checkouts/);
   assert.deepEqual(diffed, [checkout, '1'.repeat(40), '2'.repeat(40), '3'.repeat(40)]);
   assert.equal(await checkoutRemapper()(files, checkout), files);
+});
+
+/** Builds a single-entry, uncompressed ZIP like the archives GitHub serves for artifacts. */
+function storedZip(name: string, data: Buffer) {
+  const file = Buffer.from(name);
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt32LE(crc32(data), 14);
+  local.writeUInt32LE(data.length, 18);
+  local.writeUInt32LE(data.length, 22);
+  local.writeUInt16LE(file.length, 26);
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 4);
+  central.writeUInt16LE(20, 6);
+  central.writeUInt32LE(crc32(data), 16);
+  central.writeUInt32LE(data.length, 20);
+  central.writeUInt32LE(data.length, 24);
+  central.writeUInt16LE(file.length, 28);
+  const directoryOffset = local.length + file.length + data.length;
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(1, 8);
+  end.writeUInt16LE(1, 10);
+  end.writeUInt32LE(central.length + file.length, 12);
+  end.writeUInt32LE(directoryOffset, 16);
+  return Buffer.concat([local, file, data, central, file, end]);
+}
+
+// Why this test exists: Node's --experimental-test-coverage uses V8 block
+// coverage, which reports branches on a best-effort basis. A branch that never
+// runs, such as the `throw` on the expanded-size check in loadUploads, can be
+// recorded as an uncovered branch in one CI run and left out in the next, even
+// on the same OS. Mustard merges the Linux and Windows uploads, so one flicker
+// moves project coverage by a line and lists the untouched file under
+// "Indirect changes". The project check uses `target: auto` with no threshold,
+// so a flicker in the losing direction fails the PR. To diagnose a coverage
+// change that a PR did not cause, download the upload artifacts from the
+// baseline push run and the PR run (gh run download <id>), gunzip
+// coverage.json.gz, and diff `files[path].lines` per OS. An entry such as
+// [hits, 0, 1] in one run and [hits] in the other is this flicker. The fix is
+// to test the branch: once it runs, V8 reports it in every run.
+test('rejects uploads whose expanded data exceeds the per-run limit', async () => {
+  const json = JSON.stringify({ schema, commit: head, flags: ['default'], files: {} });
+  // Each payload expands to just under the per-upload limit, so the fifth
+  // upload pushes the total past the 128 MiB per-run limit.
+  const zip = storedZip('coverage.json.gz', gzipSync(json.padEnd(maxBytes - 1024, ' ')));
+  const digest = `sha256:${createHash('sha256').update(zip).digest('hex')}`;
+  const uploads = Array.from({ length: 5 }, (_, index) => ({
+    id: 100 + index,
+    name: `mustard-upload-default-${event.runId}-1-${String(index).padStart(8, '0')}-0000-0000-0000-000000000000`,
+    expired: false,
+    size_in_bytes: zip.length,
+    digest,
+  }));
+  const api = {
+    rest: { actions: { listWorkflowRunArtifacts: mock.fn() } },
+    paginate: {
+      iterator: async function* () {
+        yield { data: uploads };
+      },
+    },
+  } as unknown as GitHub;
+  const fetchMock = mock.method(globalThis, 'fetch', async () => new Response(new Uint8Array(zip)));
+  try {
+    await assert.rejects(
+      loadUploads(api, event, 'example', names('')),
+      /exceed the per-run expanded size limit/,
+    );
+    assert.equal(fetchMock.mock.callCount(), 5);
+  } finally {
+    fetchMock.mock.restore();
+  }
 });
