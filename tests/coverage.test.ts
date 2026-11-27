@@ -529,7 +529,7 @@ test('optional missing flags keep their behavior and carried-forward coverage sa
   );
 });
 
-test('a run without uploads reports carried coverage only when every flag carried forward', () => {
+test('an all-skipped run accepts optional carryforward flags without baseline data', () => {
   const config = readConfig(
     'require_uploads: true\nflags: {api: {carryforward: true}, web: {carryforward: true}}',
   );
@@ -567,12 +567,103 @@ test('a run without uploads reports carried coverage only when every flag carrie
   assert.equal(patch?.conclusion, 'failure');
   assert.match(patch?.message ?? '', /1 changed file\(s\) are only measured by carried-forward coverage/);
 
-  // One flag without a baseline leaves the run without uploads, as before.
   const partial = compute(new Map(), diff, config, new Map([['api', api]]));
-  assert.deepEqual([partial.carriedOnly, partial.hasCoverage, partial.missing], [false, false, ['web']]);
-  assert.match(partial.checks[0].message, /No coverage uploads found/);
+  assert.deepEqual([partial.hasCoverage, partial.noData, partial.incomplete], [true, ['web'], []]);
+  assert.deepEqual(
+    partial.checks.map(({ conclusion }) => conclusion),
+    ['success', 'success'],
+  );
+});
 
-  // Fresh uploads keep using carried coverage in the patch, as before.
-  const mixed = compute(new Map([['api', api]]), touched, config, new Map([['web', web]]));
-  assert.equal(mixed.checks.find((check) => check.name === 'patch')?.conclusion, 'success');
+test('an all-skipped run still needs usable carried coverage and every required flag', () => {
+  const policy = 'require_uploads: true\nflags:\n  api: {carryforward: true, paths: [src/**]}\n';
+  const api = deserialize({ 'src/api.ts': { lines: { 1: [1] } } });
+  const outside = deserialize({ 'vendor/api.ts': { lines: { 1: [1] } } });
+  const config = readConfig(policy);
+  const empty = compute(new Map(), new Map(), config, new Map([['api', outside]]));
+  assert.equal(empty.hasCoverage, false);
+  assert.equal(empty.checks[0].conclusion, 'failure');
+
+  const baseline = new Map([['api', api]]);
+  const required = readConfig(`${policy}  web: {carryforward: true, required: true}\n`);
+  const incomplete = compute(new Map(), new Map(), required, baseline);
+  assert.deepEqual(incomplete.incomplete, ['web']);
+  assert.match(incomplete.checks[0].message, /required flag\(s\) web did not report/);
+
+  const noCarry = readConfig(`${policy}  web: {carryforward: false}\n`);
+  const missing = compute(new Map(), new Map(), noCarry, baseline);
+  assert.equal(missing.hasCoverage, false);
+  assert.deepEqual(missing.noData, []);
+  assert.match(missing.checks[0].message, /No coverage uploads found/);
+});
+
+test('a run without coverage does not fail the patch over carried files it never used', () => {
+  // web cannot carry forward, so a run with no uploads has no coverage and the
+  // stale-file guard must not override the policy's no-upload conclusion.
+  const baseline = new Map([
+    ['api', deserialize({ 'api/a.ts': { lines: { 1: [1], 2: [0] } } })],
+    ['web', deserialize({ 'web/w.ts': { lines: { 1: [1] } } })],
+  ]);
+  const diff: Diff = new Map([['api/a.ts', { lines: new Set([2]) }]]);
+  for (const [uploads, conclusion] of [
+    ['false', 'neutral'],
+    ['true', 'failure'],
+  ]) {
+    const config = readConfig(
+      `require_uploads: ${uploads}\nflags:\n  api: {paths: [api/**], carryforward: true}\n  web: {paths: [web/**]}\n`,
+    );
+    const report = compute(new Map(), diff, config, baseline);
+    assert.equal(report.hasCoverage, false);
+    assert.deepEqual(
+      report.checks.map(({ name, conclusion, message }) => [name, conclusion, message]),
+      [
+        ['project', conclusion, 'No coverage uploads found for this attempt.'],
+        ['patch', conclusion, 'No coverage uploads found for this attempt.'],
+      ],
+    );
+  }
+});
+
+test('patch gates use fresh lines and detect stale files within their paths and flags', () => {
+  const config = readConfig(`
+require_uploads: true
+flags: {web: {carryforward: true}}
+coverage:
+  status:
+    patch:
+      default: {}
+      api: {flags: [api], paths: [src/shared.ts]}
+      web: {flags: [web], paths: [src/new.ts]}
+      unrelated: {flags: [web], paths: [src/other.ts]}
+ignore: [ignored/**]
+`);
+  const fresh = deserialize({ 'src/shared.ts': { lines: { 2: [0] } } });
+  const carried = deserialize({
+    'src/shared.ts': { lines: { 2: [1] } },
+    'src/old.ts': { lines: { 2: [1] } },
+    'src/deleted.ts': { lines: { 1: [1] } },
+    'src/pure-rename.ts': { lines: { 1: [1] } },
+    'src/now-ignored.ts': { lines: { 1: [1] } },
+  });
+  const diff: Diff = new Map([
+    ['src/shared.ts', { lines: new Set([2]) }],
+    ['src/new.ts', { oldPath: 'src/old.ts', lines: new Set([12]) }],
+    ['src/deleted.ts', { deleted: true, lines: new Set() }],
+    ['src/moved.ts', { oldPath: 'src/pure-rename.ts', lines: new Set() }],
+    ['ignored/generated.ts', { oldPath: 'src/now-ignored.ts', lines: new Set([1]) }],
+  ]);
+  const report = compute(new Map([['api', fresh]]), diff, config, new Map([['web', carried]]));
+  const checks = new Map(report.checks.map((check) => [check.name, check]));
+  assert.deepEqual([report.staleFiles, report.patch.hit, report.patch.miss], [1, 0, 1]);
+  assert.equal(report.project.percent, 100);
+  assert.deepEqual(
+    report.annotations.map(({ path, start_line }) => [path, start_line]),
+    [['src/shared.ts', 2]],
+  );
+  assert.equal(checks.get('patch/api')?.conclusion, 'failure');
+  assert.match(checks.get('patch/api')?.message ?? '', /0\.00% coverage/);
+  assert.equal(checks.get('patch/web')?.conclusion, 'failure');
+  assert.match(checks.get('patch/web')?.message ?? '', /only measured by carried-forward coverage/);
+  assert.equal(checks.get('patch/unrelated')?.conclusion, 'success');
+  assert.equal(report.flagPatch.has('web'), false);
 });

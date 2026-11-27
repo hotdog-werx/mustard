@@ -52,7 +52,7 @@ step to reference them in the same job.
 | ------------------------ | ------------------------------------------------------------------------------------------------------ |
 | `project-coverage`       | Project coverage as a percentage. Empty without uploads.                                               |
 | `project-delta`          | Project coverage difference from the baseline, in percentage points. Empty when it cannot be computed. |
-| `patch-coverage`         | Coverage of changed coverable lines as a percentage. Empty for pushes or without uploads.              |
+| `patch-coverage`         | Fresh patch coverage. Empty for pushes, runs without coverage, or patches with only stale coverage.    |
 | `patch-hits`             | Number of fully covered changed lines.                                                                 |
 | `patch-total`            | Number of changed coverable lines.                                                                     |
 | `baseline-sha`           | Commit SHA of the verified baseline, if available.                                                     |

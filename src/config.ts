@@ -334,3 +334,8 @@ export function readConfig(text = '', warn: (message: string) => void = () => {}
 }
 
 export type Config = ReturnType<typeof readConfig>;
+
+/** Reports whether a flag can use baseline coverage when its job did not upload. */
+export function carriesForward(config: Config): boolean {
+  return config.defaultCarryforward || [...config.flags.values()].some((flag) => flag.carryforward);
+}

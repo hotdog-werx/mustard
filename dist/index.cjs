@@ -150548,6 +150548,9 @@ function readConfig(text = "", warn = () => {
     html: bool(object(root.html).enabled)
   };
 }
+function carriesForward(config) {
+  return config.defaultCarryforward || [...config.flags.values()].some((flag) => flag.carryforward);
+}
 
 // src/github.ts
 function sha(value) {
@@ -153249,6 +153252,23 @@ function patchFiles(files, diff) {
   }
   return result;
 }
+function carriedPaths(byFlag, flags = []) {
+  const paths = /* @__PURE__ */ new Set();
+  for (const [flag, files] of byFlag) {
+    if (!flags.length || flags.includes(flag)) for (const path4 of files.keys()) paths.add(path4);
+  }
+  return paths;
+}
+function stalePatchCount(fresh, carried, diff, paths, component) {
+  const inRule = matches(paths);
+  const inComponent = matches(component);
+  let count = 0;
+  for (const [path4, change] of diff) {
+    if (change.deleted || !change.lines.size || !inRule(path4) || !inComponent(path4)) continue;
+    if (!fresh.has(path4) && (carried.has(path4) || carried.has(change.oldPath ?? path4))) count++;
+  }
+  return count;
+}
 function minimumCoverage(rule, kind, baseline) {
   const target = rule.target !== "auto" ? rule.target : kind === "project" && baseline ? totals(baseline).percent : 100;
   return Math.max(0, target - rule.threshold);
@@ -153256,32 +153276,31 @@ function minimumCoverage(rule, kind, baseline) {
 function flagList(names2) {
   return names2.join(", ");
 }
-function unavailable(hasUploads, absent, config) {
+function unavailable(hasUploads, absent, config, message2) {
   if (absent.length)
     return ["failure", `Incomplete: required flag(s) ${flagList(absent)} did not report for this attempt.`];
-  if (!hasUploads)
-    return [config.uploads ? "failure" : "neutral", "No coverage uploads found for this attempt."];
-}
-function stalePatch(kind, carriedOnly, measured) {
-  if (kind !== "patch" || !carriedOnly || !measured.size) return;
-  return `${measured.size} changed file(s) are only measured by carried-forward coverage. Their test jobs did not run for this attempt.`;
+  if (!hasUploads) return [config.uploads ? "failure" : "neutral", message2];
 }
 function check(rule, measured, baseline, config, kind, {
   hasUploads,
   completeDiff,
   absent,
-  carriedOnly
+  staleFiles,
+  noCoverageMessage
 }) {
   const make = (conclusion, message2) => ({
     name: rule.name,
     conclusion: rule.informational ? "neutral" : conclusion,
     message: message2
   });
-  const missing = unavailable(hasUploads, absent, config);
+  const missing = unavailable(hasUploads, absent, config, noCoverageMessage);
   if (missing) return make(...missing);
   if (kind === "patch" && !completeDiff) return make("failure", "The complete PR diff was unavailable.");
-  const stale = stalePatch(kind, carriedOnly, measured);
-  if (stale) return make("failure", stale);
+  if (staleFiles)
+    return make(
+      "failure",
+      `${staleFiles} changed file(s) are only measured by carried-forward coverage. Run their test jobs and upload fresh coverage.`
+    );
   const actual = totals(measured);
   if (kind === "patch" && !actual.total) return make("success", "No coverable lines changed.");
   if (!actual.total) return make("failure", "No coverable lines matched this check\u2019s paths and flags.");
@@ -153303,30 +153322,38 @@ function formatPercent(value, config) {
 }
 function prepareFlags(uploads, baseline, config) {
   const ignored = matches(config.ignore, false);
-  const filter = (files, paths) => new Map([...view(files, paths)].filter(([path4]) => !ignored(path4)));
-  const flags = /* @__PURE__ */ new Map();
+  const filter = (files, paths) => new Map([...view(files, paths)].filter(([path4, lines]) => lines.size && !ignored(path4)));
+  const freshFlags = /* @__PURE__ */ new Map();
   const baselineFlags = /* @__PURE__ */ new Map();
-  const carried = [];
+  const carriedFlags = /* @__PURE__ */ new Map();
   const missing = [];
-  for (const [name, files] of uploads) flags.set(name, filter(files, config.flags.get(name)?.paths ?? []));
+  const noData = [];
+  for (const [name, files] of uploads)
+    freshFlags.set(name, filter(files, config.flags.get(name)?.paths ?? []));
   for (const [name, files] of baseline ?? [])
     baselineFlags.set(name, filter(files, config.flags.get(name)?.paths ?? []));
   const expected = /* @__PURE__ */ new Set([
     ...config.flags.keys(),
     ...config.defaultCarryforward ? baselineFlags.keys() : []
   ]);
-  for (const name of expected) {
-    if (flags.has(name)) continue;
-    const carryforward = config.flags.get(name)?.carryforward ?? config.defaultCarryforward;
+  for (const name of [...expected].filter((name2) => !freshFlags.has(name2))) {
+    const flag = config.flags.get(name);
+    const carryforward = flag?.carryforward ?? config.defaultCarryforward;
     const previous = baselineFlags.get(name);
-    if (carryforward && previous) {
-      flags.set(name, previous);
-      carried.push(name);
-    } else missing.push(name);
+    if (carryforward && previous?.size) {
+      carriedFlags.set(name, previous);
+      continue;
+    }
+    missing.push(name);
+    if (carryforward && baseline && !flag?.required) noData.push(name);
   }
+  const flags = new Map([...freshFlags, ...carriedFlags]);
   assertBudget(flags.values());
   const incomplete = missing.filter((name) => config.flags.get(name)?.required);
-  return { flags, baselineFlags, carried, missing, incomplete };
+  return { flags, freshFlags, carriedFlags, baselineFlags, missing, noData, incomplete };
+}
+function emptyRunMessage(uploads, baseline, config) {
+  return !uploads.size && !baseline && carriesForward(config) ? "No coverage uploads or verified baseline available to carry forward. A default-branch run must publish a baseline first." : "No coverage uploads found for this attempt.";
 }
 function changedFiles(diff, files, patch, previous) {
   return [...diff].map(([path4, change]) => {
@@ -153354,24 +153381,33 @@ function indirectChanges(diff, files, previous) {
   }
   return indirect;
 }
-function coverageChecks(flags, baselineFlags, diff, config, {
+function coverageChecks({
+  flags,
+  freshFlags,
+  carriedFlags
+}, baselineFlags, diff, config, {
   hasUploads,
   completeDiff,
   hasPatch,
   hasIndirectChanges,
   incomplete,
-  carriedOnly
+  noCoverageMessage
 }) {
   const evaluate = (rule, kind, componentPaths = []) => {
-    const selection = view(view(union(flags, rule.flags), rule.paths), componentPaths);
+    const selection = view(
+      view(union(kind === "patch" ? freshFlags : flags, rule.flags), rule.paths),
+      componentPaths
+    );
     const prior = baselineFlags ? view(view(union(baselineFlags, rule.flags), rule.paths), componentPaths) : void 0;
     const hasSelectedUploads = hasUploads && (!rule.flags.length || rule.flags.some((name) => flags.has(name)));
     const absent = incomplete.filter((name) => !rule.flags.length || rule.flags.includes(name));
+    const staleFiles = kind === "patch" ? stalePatchCount(selection, carriedPaths(carriedFlags, rule.flags), diff, rule.paths, componentPaths) : 0;
     return check(rule, kind === "patch" ? patchFiles(selection, diff) : selection, prior, config, kind, {
       hasUploads: hasSelectedUploads,
       completeDiff,
       absent,
-      carriedOnly
+      staleFiles,
+      noCoverageMessage
     });
   };
   const projectChecks = config.project.map((rule) => evaluate(rule, "project"));
@@ -153408,20 +153444,26 @@ function annotatePatch(patch, patchGate, maximum) {
   return annotations;
 }
 function compute(uploads, diff, config, baseline, completeDiff = true, hasPatch = true) {
-  const { flags, baselineFlags, carried, missing, incomplete } = prepareFlags(uploads, baseline, config);
-  const files = union(flags);
+  const prepared = prepareFlags(uploads, baseline, config);
+  const { flags, freshFlags, carriedFlags, baselineFlags, missing, noData, incomplete } = prepared;
+  const fresh = union(freshFlags);
+  const files = carriedFlags.size ? union(flags) : fresh;
   const previous = baseline ? union(baselineFlags) : void 0;
-  const patch = patchFiles(files, diff);
+  const ignored = matches(config.ignore, false);
+  const patchDiff = new Map([...diff].filter(([path4]) => !ignored(path4)));
+  const patch = patchFiles(fresh, patchDiff);
+  const staleFiles = stalePatchCount(fresh, carriedPaths(carriedFlags), patchDiff, [], []);
   const project = totals(files);
   const oldProject = previous ? totals(previous) : void 0;
   const delta = oldProject ? project.percent - oldProject.percent : void 0;
   const changed = changedFiles(diff, files, patch, previous);
   const indirect = indirectChanges(diff, files, previous);
-  const carriedOnly = !uploads.size && carried.length > 0 && !missing.length;
+  const carriedOnly = !uploads.size && carriedFlags.size > 0 && missing.length === noData.length;
   const hasCoverage = uploads.size > 0 || carriedOnly;
-  const checks = coverageChecks(flags, baseline ? baselineFlags : void 0, diff, config, {
+  const noCoverageMessage = emptyRunMessage(uploads, baseline, config);
+  const checks = coverageChecks(prepared, baseline ? baselineFlags : void 0, patchDiff, config, {
     hasUploads: hasCoverage,
-    carriedOnly,
+    noCoverageMessage,
     completeDiff,
     hasPatch,
     hasIndirectChanges: indirect.length > 0,
@@ -153433,11 +153475,14 @@ function compute(uploads, diff, config, baseline, completeDiff = true, hasPatch 
   return {
     files,
     flags,
-    carried,
+    carried: [...carriedFlags.keys()],
     missing,
+    noData,
     incomplete,
     hasCoverage,
     carriedOnly,
+    noCoverageMessage,
+    staleFiles,
     project,
     delta,
     patch: patchTotal,
@@ -153447,7 +153492,7 @@ function compute(uploads, diff, config, baseline, completeDiff = true, hasPatch 
     omittedAnnotations: patchGate ? patchTotal.total - patchTotal.hit - annotations.length : 0,
     checks,
     flagTotals: new Map([...flags].map(([name, data]) => [name, totals(data)])),
-    flagPatch: new Map([...flags].map(([name, data]) => [name, totals(patchFiles(data, diff))])),
+    flagPatch: new Map([...freshFlags].map(([name, data]) => [name, totals(patchFiles(data, diff))])),
     componentTotals: new Map(
       config.components.map((component) => [
         component.id,
@@ -153495,21 +153540,22 @@ function ranges(numbers) {
   }
   return groups;
 }
-function markdownPatch(patch, completeDiff, percent2) {
+function markdownPatch({ patch, staleFiles }, completeDiff, percent2) {
   if (!completeDiff) return "The complete patch was unavailable.";
+  if (!patch.total && staleFiles) return `No fresh coverage for ${staleFiles} changed file(s).`;
   if (!patch.total) return "No coverable lines changed.";
   return `**Patch ${percent2(patch.percent)}** \xB7 ${patch.hit}/${patch.total} fully covered`;
 }
 function markdownHeader({ report, event, baseline, configChanged, hasUploads, completeDiff = true }, showTotals, percent2, delta) {
   const sections = ["## Mustard coverage"];
-  if (!hasUploads) sections.push("No coverage uploads found for this attempt.");
+  if (!hasUploads) sections.push(report.noCoverageMessage);
   if (report.carriedOnly)
     sections.push(
-      `No coverage uploads for this attempt. Every flag was carried forward from ${baseline?.sha.slice(0, 12)}.`
+      `No coverage uploads for this attempt. Project coverage was carried forward from ${baseline?.sha.slice(0, 12)}.`
     );
   if (hasUploads && showTotals) {
     sections.push(`**Project ${percent2(report.project.percent)}** \xB7 ${delta(report.delta)}`);
-    if (event.base) sections.push(markdownPatch(report.patch, completeDiff, percent2));
+    if (event.base) sections.push(markdownPatch(report, completeDiff, percent2));
   }
   if (report.incomplete.length) {
     const names2 = report.incomplete.map((flag) => `**${escapeMarkdown(flag)}**`).join(", ");
@@ -153553,6 +153599,7 @@ function markdownChangedFiles({ report, config, event }, percent2, delta) {
 function suiteStatus(flag, { report, baseline }) {
   if (report.carried.includes(flag)) return `Carried forward from ${baseline?.sha.slice(0, 12)}`;
   if (report.incomplete.includes(flag)) return "**Missing (required)**";
+  if (report.noData.includes(flag)) return "No data";
   if (report.missing.includes(flag)) return "Missing";
   return "Uploaded";
 }
@@ -153768,9 +153815,10 @@ async function publishSummary(display) {
   const { report, config } = display;
   if (display.hasUploads) setOutput("project-coverage", formatPercent(report.project.percent, config));
   setOutput("project-delta", report.delta === void 0 || !display.hasUploads ? "" : report.delta);
+  const hasPatchCoverage = report.patch.total > 0 || !report.staleFiles;
   setOutput(
     "patch-coverage",
-    display.event.base && display.hasUploads ? formatPercent(report.patch.percent, config) : ""
+    display.event.base && display.hasUploads && hasPatchCoverage ? formatPercent(report.patch.percent, config) : ""
   );
   setOutput("patch-hits", report.patch.hit);
   setOutput("patch-total", report.patch.total);
@@ -154367,9 +154415,6 @@ var package_default = {
 };
 
 // src/main.ts
-function carriesForward(config) {
-  return config.defaultCarryforward || [...config.flags.values()].some((flag) => flag.carryforward);
-}
 async function findBaselineStart(api, event, base, config) {
   if (!base && event.event === "push" && carriesForward(config)) {
     const { data } = await api.rest.repos.getCommit({ ...event.repo, ref: event.commit, per_page: 1 });

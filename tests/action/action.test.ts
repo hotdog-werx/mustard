@@ -996,21 +996,64 @@ test('an empty report fails the upload unless if-empty is warn', (t) => {
   assert.match(invalid.stdout, /if-empty must be error or warn/);
 });
 
-test('a PR whose test jobs were all skipped reports carried-forward coverage under require_uploads', (t) => {
+test('an all-skipped PR reports carried coverage when an optional suite has no baseline data', (t) => {
   const fixture = scenario(t);
   writeFileSync(join(fixture.directory, 'src/lib.ts'), 'one\ntwo\n');
   fixture.writeCoverage('SF:src/lib.ts\nDA:1,1\nDA:2,1\nend_of_record\n');
-  const config = { MUSTARD_TEST_CONFIG_SUFFIX: 'flags: {lib: {carryforward: true}}\n' };
+  writeFileSync(join(fixture.directory, 'coverage.xml'), '<coverage><packages/></coverage>');
+  const config = {
+    MUSTARD_TEST_CONFIG_SUFFIX: 'flags: {lib: {carryforward: true}, api: {carryforward: true}}\n',
+  };
   const push = { ...config, MUSTARD_TEST_EVENT: 'push' };
   ok(fixture.run({ mode: 'upload', files: 'lcov.info', flag: 'lib' }, push));
+  ok(fixture.run({ mode: 'upload', files: 'coverage.xml', flag: 'api', 'if-empty': 'warn' }, push));
   ok(fixture.run({}, push));
   const report = ok(fixture.run({ 'fail-ci': 'true' }, config));
   assert.equal(report.outputs['baseline-sha'], base);
   assert.equal(report.outputs['project-coverage'], '100.00%');
   assert.equal(report.outputs['project-status'], 'success');
   assert.equal(report.outputs['patch-status'], 'success');
-  assert.match(report.summary, /Every flag was carried forward from a{12}/);
+  assert.match(report.summary, /Project coverage was carried forward from a{12}/);
+  assert.match(report.summary, /\| api \| — \| — \| — \| No data \|/);
   assert.doesNotMatch(report.summary, /No coverage uploads found|No verified baseline/);
+});
+
+test('an all-skipped PR without a baseline tells users where to seed coverage', (t) => {
+  const fixture = scenario(t);
+  const report = fixture.run(
+    { 'fail-ci': 'true' },
+    { MUSTARD_TEST_CONFIG_SUFFIX: 'flag_management: {default_rules: {carryforward: true}}\n' },
+  );
+  assert.equal(report.status, 1, report.diagnostics);
+  assert.equal(report.outputs['baseline-sha'], '');
+  assert.equal(report.outputs['patch-status'], 'failure');
+  assert.match(report.summary, /No coverage uploads or verified baseline available to carry forward/);
+  assert.match(report.stdout, /mustard\/patch: .*A default-branch run must publish a baseline first/);
+});
+
+test('a skipped suite cannot supply patch coverage when an unrelated suite uploaded', (t) => {
+  const fixture = scenario(t);
+  const config = {
+    MUSTARD_TEST_CONFIG_SUFFIX: 'flags: {lib: {carryforward: true}, api: {carryforward: true}}\n',
+  };
+  const push = { ...config, MUSTARD_TEST_EVENT: 'push' };
+  fixture.writeCoverage(fullCoverage);
+  ok(fixture.run({ mode: 'upload', files: 'lcov.info', flag: 'api' }, push));
+  ok(fixture.run({}, push));
+
+  writeFileSync(join(fixture.directory, 'src/lib.ts'), 'one\ntwo\n');
+  fixture.writeCoverage('SF:src/lib.ts\nDA:1,1\nDA:2,1\nend_of_record\n');
+  ok(fixture.run({ mode: 'upload', files: 'lcov.info', flag: 'lib' }, config));
+  const report = fixture.run({ 'fail-ci': 'true' }, config);
+  assert.equal(report.status, 1, report.diagnostics);
+  assert.equal(report.outputs['baseline-sha'], base);
+  assert.equal(report.outputs['project-coverage'], '100.00%');
+  assert.equal(report.outputs['patch-status'], 'failure');
+  assert.equal(report.outputs['patch-total'], '0');
+  assert.equal(report.outputs['patch-coverage'], '');
+  assert.match(report.summary, /No fresh coverage for 1 changed file/);
+  assert.match(report.summary, /only measured by carried-forward coverage/);
+  assert.match(report.summary, /\| api \| 100\.00% \| — \| 3\/3 \| Carried forward/);
 });
 
 test('names the workflow that holds a baseline when the report searches another one', (t) => {
