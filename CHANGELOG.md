@@ -1,3 +1,11 @@
+## [0.2.1] - 2026-11-27
+
+### 🐛 Bug Fixes
+
+- Keep carried coverage out of patch checks (#10) by
+  [@jamestrousdale](https://github.com/jamestrousdale) in
+  [#10](https://github.com/hotdog-werx/mustard/pull/10)
+
 ## [0.2.0] - 2026-11-27
 
 ### 🚀 Features
