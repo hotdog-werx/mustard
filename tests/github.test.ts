@@ -823,7 +823,18 @@ test('summarizes global coverage first, then a row per flag, and explains a miss
   assert.match(
     message,
     /^Mustard coverage is incomplete, and fail-ci is enabled:\n- Required flag\(s\) did not report: cpp\./,
+  ); // A failing non-patch check is listed after the missing flags without the uncovered-lines hint.
+  const project = report.checks.filter((check) => check.name === 'project');
+  const both = failureMessage(project, report, 'mustard', {
+    fromBase: false,
+    hasConfig: true,
+    configChanged: false,
+  });
+  assert.match(
+    both,
+    /^1 Mustard coverage check\(s\) failed[^]*did not report: cpp\.\n- mustard\/project: Incomplete/,
   );
+  assert.doesNotMatch(both, /lack full coverage/);
 });
 
 test('baseline lookup skips a report that lacks a required flag', async (t) => {
