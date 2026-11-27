@@ -120,6 +120,27 @@ github.get(/.*/).reply((request: Request) => {
     if (process.env.MUSTARD_TEST_PR_RETARGETED === 'true') current.base.ref = 'release/1.x';
     return [200, current];
   }
+  if (route === `/compare/${head}...${merge}`) {
+    // The base branch inserted one line at the top of the measured file after the PR branched.
+    const offset = process.env.MUSTARD_TEST_MERGE_OFFSET;
+    if (!offset) return [200, { merge_base_commit: { sha: base } }];
+    if (offset === 'error') return [404, { message: 'Not Found' }];
+    return [
+      200,
+      {
+        merge_base_commit: { sha: head },
+        files: [
+          {
+            filename: 'src/example.ts',
+            status: 'modified',
+            // An addition count that disagrees with the patch marks the comparison incomplete.
+            additions: offset === 'incomplete' ? 2 : 1,
+            patch: '@@ -0,0 +1 @@\n+base line',
+          },
+        ],
+      },
+    ];
+  }
   if (route.startsWith('/compare/')) {
     const additions = process.env.MUSTARD_TEST_LARGE_DIFF === 'true' ? 75 : 2;
     const patch =

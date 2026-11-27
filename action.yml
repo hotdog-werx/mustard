@@ -27,12 +27,15 @@ inputs:
   strict-paths:
     description: Fail upload if a normalized source path is absent from the checkout.
     default: 'false'
+  if-empty:
+    description: 'What upload does when the reports have no coverable lines: error, or warn and upload nothing.'
+    default: error
   config:
     description: Repository-relative Mustard configuration file path.
   config-source:
     description: Config ref for same-repository pull requests. Forks always use the merge base.
   workflow:
-    description: Repository-relative workflow file used to locate baseline artifacts.
+    description: Repository-relative push workflow file whose runs hold baseline reports. Defaults to the current workflow.
   fail-ci:
     description: Fail the aggregation step when a non-informational Mustard check fails.
     default: 'false'

@@ -18,7 +18,7 @@ import { after, test } from 'node:test';
 import { gunzipSync } from 'node:zlib';
 import { parse } from 'yaml';
 import { readZip } from '../../src/artifacts.ts';
-import { base, changedCoverage, fullCoverage, head } from './scenario.ts';
+import { base, changedCoverage, fullCoverage, head, merge } from './scenario.ts';
 
 type State = {
   archives: Array<{ id: number; run: number; name: string; digest: string }>;
@@ -240,6 +240,7 @@ test('upload uses the artifact service and writes a normalized archive for the P
     schema: 'mustard.coverage/v1',
     commit: head,
     flags: ['frontend'],
+    checkout: merge,
     files: { 'src/example.ts': { lines: { '1': [1], '2': [0], '3': [1] } } },
   });
 });
@@ -941,5 +942,99 @@ test('an older default-branch run cannot overwrite current coverage badges', (t)
   assert.equal(
     fixture.state().calls.some((call) => call.method !== 'GET' && call.route.startsWith('/git/')),
     false,
+  );
+});
+
+/** Reads the default patch check's annotated lines. */
+function patchAnnotations(state: State) {
+  const patch = checks(state).find((call) => call.body?.name === 'mustard/patch');
+  const output = patch?.body?.output as { annotations: Array<{ start_line: number }> } | undefined;
+  return output?.annotations.map((item) => item.start_line);
+}
+
+// The merge checkout has one base-branch line above the head's three lines.
+const mergeCoverage = 'SF:src/example.ts\nDA:1,0\nDA:2,1\nDA:3,0\nDA:4,1\nend_of_record\n';
+
+test('maps coverage from the PR merge checkout to the head line numbers', (t) => {
+  const fixture = scenario(t);
+  fixture.writeCoverage(mergeCoverage);
+  ok(fixture.run({ mode: 'upload', files: 'lcov.info' }));
+  const report = ok(fixture.run({}, { MUSTARD_TEST_MERGE_OFFSET: 'true' }));
+  // Head lines 1-3 are hit, missed, hit. The base-only line is dropped.
+  assert.equal(report.outputs['project-coverage'], '66.66%');
+  assert.deepEqual([report.outputs['patch-hits'], report.outputs['patch-total']], ['1', '2']);
+  assert.deepEqual(patchAnnotations(fixture.state()), [2]);
+  assert.doesNotMatch(report.stdout, /Could not map coverage/);
+});
+
+test('keeps merge checkout line numbers and warns when the head diff is unavailable', (t) => {
+  // The checkout does not descend from the head, the comparison is incomplete, or it fails.
+  for (const offset of ['', 'incomplete', 'error']) {
+    const fixture = scenario(t);
+    fixture.writeCoverage(mergeCoverage);
+    ok(fixture.run({ mode: 'upload', files: 'lcov.info' }));
+    const report = ok(fixture.run({}, { MUSTARD_TEST_MERGE_OFFSET: offset }));
+    assert.match(report.stdout, /Could not map coverage from test checkout c{12} to PR head b{12}/);
+    assert.equal(report.outputs['project-coverage'], '50.00%');
+    assert.deepEqual(patchAnnotations(fixture.state()), [1]);
+  }
+});
+
+test('an empty report fails the upload unless if-empty is warn', (t) => {
+  const fixture = scenario(t);
+  writeFileSync(join(fixture.directory, 'coverage.xml'), '<coverage><packages/></coverage>');
+  const failed = fixture.run({ mode: 'upload', files: 'coverage.xml' });
+  assert.equal(failed.status, 1, failed.diagnostics);
+  assert.match(failed.stdout, /no usable coverable lines/);
+  const warned = ok(fixture.run({ mode: 'upload', files: 'coverage.xml', flag: 'api', 'if-empty': 'warn' }));
+  assert.match(
+    warned.stdout,
+    /::warning::Coverage reports contain no usable coverable lines\. Nothing was uploaded for flag api\./,
+  );
+  assert.equal(fixture.state().archives.length, 0);
+  const invalid = fixture.run({ mode: 'upload', files: 'coverage.xml', 'if-empty': 'skip' });
+  assert.match(invalid.stdout, /if-empty must be error or warn/);
+});
+
+test('a PR whose test jobs were all skipped reports carried-forward coverage under require_uploads', (t) => {
+  const fixture = scenario(t);
+  writeFileSync(join(fixture.directory, 'src/lib.ts'), 'one\ntwo\n');
+  fixture.writeCoverage('SF:src/lib.ts\nDA:1,1\nDA:2,1\nend_of_record\n');
+  const config = { MUSTARD_TEST_CONFIG_SUFFIX: 'flags: {lib: {carryforward: true}}\n' };
+  const push = { ...config, MUSTARD_TEST_EVENT: 'push' };
+  ok(fixture.run({ mode: 'upload', files: 'lcov.info', flag: 'lib' }, push));
+  ok(fixture.run({}, push));
+  const report = ok(fixture.run({ 'fail-ci': 'true' }, config));
+  assert.equal(report.outputs['baseline-sha'], base);
+  assert.equal(report.outputs['project-coverage'], '100.00%');
+  assert.equal(report.outputs['project-status'], 'success');
+  assert.equal(report.outputs['patch-status'], 'success');
+  assert.match(report.summary, /Every flag was carried forward from a{12}/);
+  assert.doesNotMatch(report.summary, /No coverage uploads found|No verified baseline/);
+});
+
+test('names the workflow that holds a baseline when the report searches another one', (t) => {
+  const fixture = scenario(t);
+  fixture.writeCoverage(fullCoverage);
+  const push = { MUSTARD_TEST_EVENT: 'push' };
+  ok(fixture.run({ mode: 'upload', files: 'lcov.info' }, push));
+  ok(fixture.run({}, push));
+  ok(fixture.run({ mode: 'upload', files: 'lcov.info' }));
+  const report = ok(fixture.run({ workflow: '.github/workflows/pr.yaml' }));
+  assert.equal(report.outputs['baseline-sha'], '');
+  assert.match(
+    report.stdout,
+    /::warning::No baseline from \.github\/workflows\/pr\.yaml, but push run 6 of \.github\/workflows\/ci\.yaml has a Mustard report for a{12}\. Set the workflow input to \.github\/workflows\/ci\.yaml/,
+  );
+});
+
+test('explains an empty baseline search and points at the workflow input', (t) => {
+  const fixture = scenario(t);
+  fixture.writeCoverage(fullCoverage);
+  ok(fixture.run({ mode: 'upload', files: 'lcov.info' }));
+  const report = ok(fixture.run());
+  assert.match(
+    report.stdout,
+    /No baseline report found in push runs of \.github\/workflows\/ci\.yaml across 1 commit\(s\)\. If push coverage runs in another workflow file, set the workflow input/,
   );
 });

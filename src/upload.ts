@@ -135,6 +135,20 @@ export function pathResolver(workspace: string, root: string, fixes: Fix[]) {
   return { normalize, unmatched };
 }
 
+/** Reads what upload does with reports that have no coverable lines. action.yml defaults it to error. */
+function emptyPolicy() {
+  const value = getInput('if-empty');
+  if (value !== 'error' && value !== 'warn') throw new Error('if-empty must be error or warn');
+  return value;
+}
+
+/** Fails an upload without coverable lines, or warns and skips it when `if-empty` is `warn`. */
+function skipEmpty(flag: string, policy: 'error' | 'warn') {
+  const message = 'Coverage reports contain no usable coverable lines';
+  if (policy === 'error') throw new Error(message);
+  warning(`${message}. Nothing was uploaded for flag ${flag}.`);
+}
+
 /** Discovers, normalizes, and uploads coverage for the exact commit, flag, and shard represented by this job. */
 export async function upload(api: GitHub, namespace: Names, workspace: string) {
   const pull = context.payload.pull_request;
@@ -148,6 +162,7 @@ export async function upload(api: GitHub, namespace: Names, workspace: string) {
   const format = getInput('format') || 'auto';
   const flag = slug(getInput('flag') || 'default');
   const shard = getInput('shard') || undefined;
+  const ifEmpty = emptyPolicy();
   const fileInput = getInput('files');
   const paths = inputs(fileInput, workspace);
   const files: Files = new Map();
@@ -175,13 +190,13 @@ export async function upload(api: GitHub, namespace: Names, workspace: string) {
     if (getBooleanInput('strict-paths')) throw new Error(message);
     warning(message);
   }
-  if (!files.size) throw new Error('Coverage reports contain no usable coverable lines');
+  if (!files.size) return skipEmpty(flag, ifEmpty);
   const run = integer(context.runId, 1);
   const attempt = integer(process.env.GITHUB_RUN_ATTEMPT ?? 1, 1);
   const name = uploadName(namespace.artifact, flag, run, attempt, shard);
   const { id, digest } = await putArtifact(
     name,
-    new Map([['coverage.json.gz', uploadPayload(commit, flag, files, shard)]]),
+    new Map([['coverage.json.gz', uploadPayload(commit, flag, files, shard, testCheckout)]]),
     retention(),
   );
   info(`Uploaded ${name} (artifact ${id}, SHA-256 ${digest})`);

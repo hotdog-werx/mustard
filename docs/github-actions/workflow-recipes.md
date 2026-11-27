@@ -102,6 +102,66 @@ When you add a required flag, earlier baselines lack it, so Mustard skips them.
 Project checks with an `auto` target use `if_no_baseline` until a complete
 default-branch run publishes a new baseline.
 
+## Skip unchanged packages in a monorepo
+
+When each package has its own test job and PRs skip jobs whose paths did not
+change, give each package a flag with `paths` and `carryforward: true`:
+
+```yaml
+require_uploads: true
+flags:
+  api: { paths: [packages/api/**], carryforward: true }
+  web: { paths: [packages/web/**], carryforward: true }
+```
+
+A skipped package's coverage comes from the baseline. When a PR skips every test
+job, the report still runs and carries every flag forward. Keep the report job's
+`if: always() && !cancelled()` so it runs after skipped jobs. A new package
+whose report has no coverable lines yet, such as one with only an empty
+`__init__.py`, fails the upload by default. Set `if-empty: warn` on its upload
+step to skip the upload instead.
+
+## Separate PR and push workflows
+
+Mustard reads baselines from push runs of the report's own workflow file. If PR
+and push checks live in different files, set `workflow` to the push workflow in
+both reports:
+
+```yaml
+- uses: hotdog-werx/mustard@<mustard-commit-sha>
+  with:
+    workflow: .github/workflows/push.yml
+```
+
+Without it, a PR report searches push runs of the PR workflow, finds none, and
+keeps the project check neutral. The job log names the workflow it searched.
+
+## Run the report from a reusable workflow
+
+A reusable workflow can run the report job, but the caller grants its
+permissions. A called workflow's jobs cannot get more than the calling job
+allows. Give the calling job every permission the report needs, on PR and push
+callers alike, including `id-token: write` and `attestations: write` for signing
+baselines:
+
+```yaml
+jobs:
+  coverage:
+    needs: [test]
+    if: always() && !cancelled()
+    uses: ./.github/workflows/mustard-report.yml
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+      pull-requests: write
+      id-token: write
+      attestations: write
+```
+
+`GITHUB_WORKFLOW_REF` names the caller's workflow file, so baselines follow the
+caller. When PR and push callers differ, set `workflow` as shown above.
+
 ## Publish a badge
 
 Add the following to the default branch's `.github/mustard.yml`.

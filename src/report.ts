@@ -3,7 +3,9 @@ import type { Files, FlagFiles, Line } from './coverage.ts';
 import { gate, matches } from './config.ts';
 import type { Conclusion, Config, Gate } from './config.ts';
 
-export type Change = { oldPath?: string; lines: Set<number>; deleted?: boolean };
+/** A run of changed lines: new lines [newStart, newEnd) replace old lines [oldStart, oldEnd). */
+export type Segment = { oldStart: number; oldEnd: number; newStart: number; newEnd: number };
+export type Change = { oldPath?: string; lines: Set<number>; deleted?: boolean; segments?: Segment[] };
 export type Diff = Map<string, Change>;
 export type Check = { name: string; conclusion: Conclusion; message: string };
 export type Annotation = {
@@ -64,6 +66,12 @@ function unavailable(
     return [config.uploads ? 'failure' : 'neutral', 'No coverage uploads found for this attempt.'];
 }
 
+/** Rejects patch lines measured only by coverage carried from an earlier commit, whose line numbers may be stale. */
+function stalePatch(kind: 'project' | 'patch', carriedOnly: boolean, measured: Files): string | undefined {
+  if (kind !== 'patch' || !carriedOnly || !measured.size) return;
+  return `${measured.size} changed file(s) are only measured by carried-forward coverage. Their test jobs did not run for this attempt.`;
+}
+
 /** Evaluates one coverage gate, including no-upload, no-baseline, and incomplete-diff cases. */
 function check(
   rule: Gate,
@@ -71,7 +79,12 @@ function check(
   baseline: Files | undefined,
   config: Config,
   kind: 'project' | 'patch',
-  { hasUploads, completeDiff, absent }: { hasUploads: boolean; completeDiff: boolean; absent: string[] },
+  {
+    hasUploads,
+    completeDiff,
+    absent,
+    carriedOnly,
+  }: { hasUploads: boolean; completeDiff: boolean; absent: string[]; carriedOnly: boolean },
 ): Check {
   const make = (conclusion: Conclusion, message: string) => ({
     name: rule.name,
@@ -81,6 +94,8 @@ function check(
   const missing = unavailable(hasUploads, absent, config);
   if (missing) return make(...missing);
   if (kind === 'patch' && !completeDiff) return make('failure', 'The complete PR diff was unavailable.');
+  const stale = stalePatch(kind, carriedOnly, measured);
+  if (stale) return make('failure', stale);
   const actual = totals(measured);
   if (kind === 'patch' && !actual.total) return make('success', 'No coverable lines changed.');
   // An empty selection is 100% by arithmetic, which would let a mistyped path
@@ -186,12 +201,14 @@ function coverageChecks(
     hasPatch,
     hasIndirectChanges,
     incomplete,
+    carriedOnly,
   }: {
     hasUploads: boolean;
     completeDiff: boolean;
     hasPatch: boolean;
     hasIndirectChanges: boolean;
     incomplete: string[];
+    carriedOnly: boolean;
   },
 ) {
   const evaluate = (rule: Gate, kind: 'project' | 'patch', componentPaths: string[] = []) => {
@@ -207,6 +224,7 @@ function coverageChecks(
       hasUploads: hasSelectedUploads,
       completeDiff,
       absent,
+      carriedOnly,
     });
   };
   const projectChecks = config.project.map((rule) => evaluate(rule, 'project'));
@@ -268,8 +286,12 @@ export function compute(
   const delta = oldProject ? project.percent - oldProject.percent : undefined;
   const changed = changedFiles(diff, files, patch, previous);
   const indirect = indirectChanges(diff, files, previous);
+  // With no fresh uploads, the run still has coverage when every expected flag was carried forward.
+  const carriedOnly = !uploads.size && carried.length > 0 && !missing.length;
+  const hasCoverage = uploads.size > 0 || carriedOnly;
   const checks = coverageChecks(flags, baseline ? baselineFlags : undefined, diff, config, {
-    hasUploads: uploads.size > 0,
+    hasUploads: hasCoverage,
+    carriedOnly,
     completeDiff,
     hasPatch,
     hasIndirectChanges: indirect.length > 0,
@@ -284,6 +306,8 @@ export function compute(
     carried,
     missing,
     incomplete,
+    hasCoverage,
+    carriedOnly,
     project,
     delta,
     patch: patchTotal,

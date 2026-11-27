@@ -8,6 +8,12 @@ protected branch allowed by `baseline.trusted_branches`. Look for the
 `mustard-report-…` artifact on that run and review any baseline rejection
 warnings in the current job. Expired artifacts are skipped. The patch check can
 still run.
+
+Mustard only reads baselines from push runs of the report's workflow file. When
+the walk finds none, the job log names the workflow file and the number of
+commits searched. If a push run of another workflow file holds a report for a
+searched commit, a warning names that file. Set the `workflow` input to it. See
+[separate PR and push workflows](github-actions/workflow-recipes.md#separate-pr-and-push-workflows).
 [Baseline eligibility and retention](concepts/storage.md#which-reports-can-become-baselines)
 
 ## Patch fails on the PR that adds Mustard
@@ -33,9 +39,10 @@ to fail coverage checks when nothing was uploaded.
 The patch score covers changed, coverable lines. Mustard counts a hit line with
 an uncovered branch as partial. Check the line annotations for those branches.
 If annotations point to the wrong lines, confirm the report uses repo-relative
-source paths and that the test job ran against the code being diffed. If the
-synthetic PR merge checkout shifts line numbers, check out
-`github.event.pull_request.head.sha` for PR test jobs.
+source paths and that the test job ran against the code being diffed. Mustard
+maps coverage from GitHub's PR merge checkout to the head's line numbers. If the
+log warns that it could not map coverage from the test checkout, check out
+`github.event.pull_request.head.sha` in PR test jobs instead.
 [Coverage formats and path mapping](configuration.md#coverage-inputs-and-paths)
 
 ## The PR changes coverage configuration but the checks use the old policy

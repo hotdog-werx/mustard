@@ -5,7 +5,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { mock, test } from 'node:test';
-import { downloadArtifact, names, readBaseline, readZip } from '../src/artifacts.ts';
+import {
+  checkoutRemapper,
+  downloadArtifact,
+  names,
+  readBaseline,
+  readZip,
+  uploadCheckout,
+} from '../src/artifacts.ts';
 import {
   assertSubject,
   attestationPolicy,
@@ -15,7 +22,15 @@ import {
   unsupported,
 } from '../src/baseline.ts';
 import { readConfig } from '../src/config.ts';
-import { compareFiles, gitDiff, newLines, parseGitDiff } from '../src/diff.ts';
+import {
+  compareFiles,
+  gitDiff,
+  newLines,
+  oldLine,
+  parseGitDiff,
+  parsePatch,
+  remapFiles,
+} from '../src/diff.ts';
 import { resolvePull } from '../src/github.ts';
 import type { Event, GitHub, Pull, Run } from '../src/github.ts';
 import {
@@ -28,7 +43,7 @@ import {
   writeChecks,
 } from '../src/publish.ts';
 import { compute } from '../src/report.ts';
-import { deserialize } from '../src/coverage.ts';
+import { deserialize, serialize } from '../src/coverage.ts';
 
 const head = 'b'.repeat(40);
 const base = 'a'.repeat(40);
@@ -867,4 +882,75 @@ test('baseline lookup skips a report that lacks a required flag', async (t) => {
   assert.equal(complete?.runId, 7);
   const partial = readConfig(`${settings}\nflags: {cpp: {required: true}}`);
   assert.equal(await findBaseline(api, event, base, 'example', partial, names('')), undefined);
+});
+
+test('maps new-side lines through insertions, deletions, and replacements', () => {
+  // Zero-context hunks name the line before an empty side. New 1-2 are inserted,
+  // old 5-6 are deleted, and old 9 is replaced by new 9-10.
+  const zero = parsePatch(
+    '@@ -0,0 +1,2 @@\n+a\n+b\n@@ -5,2 +6,0 @@\n-x\n-y\n@@ -9 +9,2 @@\n-old\n+n1\n+n2\n',
+  );
+  assert.deepEqual([...zero.lines], [1, 2, 9, 10]);
+  assert.deepEqual(
+    [1, 2, 3, 6, 7, 8, 9, 10, 11].map((line) => oldLine(line, zero.segments)),
+    [undefined, undefined, 1, 4, 7, 8, undefined, undefined, 10],
+  );
+  // Compare API patches carry context lines.
+  const context = parsePatch('@@ -1,3 +1,4 @@\n ctx1\n+added\n ctx2\n ctx3\n\\ No newline at end of file');
+  assert.deepEqual(
+    [1, 2, 3, 4, 5].map((line) => oldLine(line, context.segments)),
+    [1, undefined, 2, 3, 4],
+  );
+  assert.throws(() => parsePatch('@@ -1,2 +1,2 @@\n-a\n+b'), /Truncated/);
+});
+
+test('remaps merge-checkout coverage to head paths and drops base-only files and lines', () => {
+  const coverage = deserialize({
+    'src/a.ts': { lines: { 1: [1], 3: [0], 9: [1] } },
+    'src/new.ts': { lines: { 4: [2] } },
+    'src/base.ts': { lines: { 1: [1] } },
+    'src/same.ts': { lines: { 7: [1] } },
+  });
+  const diff = new Map([
+    ['src/a.ts', { lines: new Set([1, 2]), segments: parsePatch('@@ -0,0 +1,2 @@\n+a\n+b').segments }],
+    ['src/new.ts', { lines: new Set<number>(), oldPath: 'src/old.ts', segments: [] }],
+    ['src/base.ts', { lines: new Set([1]), segments: parsePatch('@@ -0,0 +1 @@\n+x').segments }],
+    ['src/gone.ts', { lines: new Set<number>(), deleted: true }],
+  ]);
+  const files = remapFiles(coverage, diff);
+  assert.deepEqual(Object.keys(serialize(files)).sort(), ['src/a.ts', 'src/old.ts', 'src/same.ts']);
+  assert.deepEqual(serialize(files)['src/a.ts'].lines, { 1: [0], 7: [1] });
+  assert.deepEqual(serialize(files)['src/old.ts'].lines, { 4: [2] });
+  assert.deepEqual(serialize(files)['src/same.ts'].lines, { 7: [1] });
+  assert.equal(remapFiles(deserialize({ 'src/gone.ts': { lines: { 1: [1] } } }), diff).size, 0);
+});
+
+test("validates an upload's recorded checkout and diffs each checkout once", async () => {
+  const payload = { schema: 'mustard.coverage/v1', commit: head, flags: ['unit'], shard: 'linux' };
+  assert.equal(uploadCheckout(payload, event, 'unit', 'linux'), undefined);
+  const checkout = 'c'.repeat(40);
+  assert.equal(uploadCheckout({ ...payload, checkout }, event, 'unit', 'linux'), checkout);
+  for (const invalid of [{ checkout: 'C'.repeat(40) }, { checkout: 7 }, { commit: base }, { shard: 'mac' }])
+    assert.throws(() => uploadCheckout({ ...payload, ...invalid }, event, 'unit', 'linux'), /does not match/);
+
+  const files = deserialize({ 'src/a.ts': { lines: { 2: [1] } } });
+  const diffed: string[] = [];
+  const remap = checkoutRemapper(async (sha) => {
+    diffed.push(sha);
+    return sha === checkout
+      ? new Map([
+          [
+            'src/a.ts',
+            { lines: new Set([1]), segments: [{ oldStart: 1, oldEnd: 1, newStart: 1, newEnd: 2 }] },
+          ],
+        ])
+      : undefined;
+  });
+  assert.equal(await remap(files, undefined), files);
+  assert.deepEqual(serialize(await remap(files, checkout)), { 'src/a.ts': { lines: { 1: [1] } } });
+  assert.deepEqual(serialize(await remap(files, checkout)), { 'src/a.ts': { lines: { 1: [1] } } });
+  for (const other of ['1', '2', '3']) assert.equal(await remap(files, other.repeat(40)), files);
+  await assert.rejects(remap(files, '4'.repeat(40)), /too many test checkouts/);
+  assert.deepEqual(diffed, [checkout, '1'.repeat(40), '2'.repeat(40), '3'.repeat(40)]);
+  assert.equal(await checkoutRemapper()(files, checkout), files);
 });

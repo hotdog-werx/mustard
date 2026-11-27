@@ -17,6 +17,8 @@ import {
   slug,
 } from './coverage.ts';
 import type { Files, FlagFiles } from './coverage.ts';
+import { remapFiles } from './diff.ts';
+import type { Diff } from './report.ts';
 import type { Event, GitHub, Repo } from './github.ts';
 
 const maxArchive = maxBytes + 2 * 1024 * 1024;
@@ -66,9 +68,19 @@ export function uploadName(
   return `${prefix}-upload-${slug(flag)}-${run}-${attempt}-${randomUUID()}${suffix}`;
 }
 
-/** Encodes normalized coverage together with the commit, flag, and optional shard that produced it. */
-export function uploadPayload(commit: string, flag: string, files: Files, shard?: string) {
-  return gz({ schema, commit, flags: [flag], shard, files: serialize(files) });
+/**
+ * Encodes normalized coverage together with the commit, flag, and optional shard that produced it.
+ * `checkout` records a different commit the tests ran on, such as a PR merge commit.
+ */
+export function uploadPayload(commit: string, flag: string, files: Files, shard?: string, checkout?: string) {
+  return gz({
+    schema,
+    commit,
+    flags: [flag],
+    shard,
+    ...(checkout && checkout !== commit ? { checkout } : {}),
+    files: serialize(files),
+  });
 }
 
 /** Uploads the supplied entries as one Actions artifact and returns its ID and SHA-256 digest. */
@@ -212,12 +224,50 @@ export async function downloadArtifact(repo: Repo, entry: Artifact, token: strin
   return { bytes, digest };
 }
 
+/** Checks an upload's identity against the run and returns the separate test checkout it records, if any. */
+export function uploadCheckout(
+  payload: Record<string, unknown>,
+  event: Event,
+  flag: string,
+  shard: string | undefined,
+): string | undefined {
+  const { checkout } = payload;
+  if (
+    payload.schema !== schema ||
+    payload.commit !== event.coverageCommit ||
+    !Array.isArray(payload.flags) ||
+    payload.flags.length !== 1 ||
+    payload.flags[0] !== flag ||
+    payload.shard !== shard ||
+    (checkout !== undefined && (typeof checkout !== 'string' || !/^[0-9a-f]{40}$/.test(checkout)))
+  ) {
+    throw new Error('Coverage upload does not match the run commit, schema, flag, or shard');
+  }
+  return checkout;
+}
+
+/** Maps coverage from each upload's test checkout to the PR head, diffing each checkout once. */
+export function checkoutRemapper(checkoutDiff?: (checkout: string) => Promise<Diff | undefined>) {
+  const diffs = new Map<string, Promise<Diff | undefined>>();
+  return async (files: Files, checkout: string | undefined): Promise<Files> => {
+    if (!checkout || !checkoutDiff) return files;
+    // The jobs of one run share a checkout, so more than a few means something is wrong.
+    if (!diffs.has(checkout) && diffs.size >= 4)
+      throw new Error('Coverage uploads come from too many test checkouts');
+    const pending = diffs.get(checkout) ?? checkoutDiff(checkout);
+    diffs.set(checkout, pending);
+    const diff = await pending;
+    return diff ? remapFiles(files, diff) : files;
+  };
+}
+
 /** Selects the newest upload for each shard, then verifies and merges the selected uploads by flag. */
 export async function loadUploads(
   api: GitHub,
   event: Event,
   token: string,
   namespace: Names,
+  checkoutDiff?: (checkout: string) => Promise<Diff | undefined>,
 ): Promise<FlagFiles> {
   const all = await listArtifacts(api, event.repo, event.runId);
   const prefix = `${namespace.artifact}-upload-`;
@@ -259,6 +309,7 @@ export async function loadUploads(
     throw new Error('Coverage uploads exceed the per-run size or artifact count limit');
   }
   const flags: FlagFiles = new Map();
+  const remap = checkoutRemapper(checkoutDiff);
   let expanded = 0;
   for (const { entry, flag, shard } of valid.sort((a, b) => a.entry.id - b.entry.id)) {
     const { bytes } = await downloadArtifact(event.repo, entry, token);
@@ -267,17 +318,9 @@ export async function loadUploads(
     expanded += json.length;
     if (expanded > maxRunBytes) throw new Error('Coverage uploads exceed the per-run expanded size limit');
     const payload = record(JSON.parse(json.toString('utf8')));
-    if (
-      payload.schema !== schema ||
-      payload.commit !== event.coverageCommit ||
-      !Array.isArray(payload.flags) ||
-      payload.flags.length !== 1 ||
-      payload.flags[0] !== flag ||
-      payload.shard !== shard
-    ) {
-      throw new Error('Coverage upload does not match the run commit, schema, flag, or shard');
-    }
-    flags.set(flag, mergeFiles(flags.get(flag) ?? new Map(), deserialize(payload.files)));
+    const checkout = uploadCheckout(payload, event, flag, shard);
+    const files = await remap(deserialize(payload.files), checkout);
+    flags.set(flag, mergeFiles(flags.get(flag) ?? new Map(), files));
     assertBudget(flags.values());
   }
   return flags;
