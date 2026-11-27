@@ -6,7 +6,7 @@ import { gz, loadUploads, names, putArtifact, reportArtifactName } from './artif
 import type { Names } from './artifacts.ts';
 import { findBaseline, protectedBranch, signReport } from './baseline.ts';
 import { schema, serialize, totals } from './coverage.ts';
-import { getDiff } from './diff.ts';
+import { checkoutDiff, getDiff } from './diff.ts';
 import { publishBadge, uploadHtml } from './extras.ts';
 import { configAt, getEvent, isProtectedSource, loadConfig, sha } from './github.ts';
 import { failureMessage, publishSummary, stickyComment, writeChecks } from './publish.ts';
@@ -17,20 +17,14 @@ import type { Event, GitHub } from './github.ts';
 import { retention, upload } from './upload.ts';
 import pkg from '../package.json' with { type: 'json' };
 
+/** Reports whether any flag can take coverage from the baseline when its job did not upload. */
+function carriesForward(config: Config) {
+  return config.defaultCarryforward || [...config.flags.values()].some((flag) => flag.carryforward);
+}
+
 /** Selects the merge base or the first parent of a push that uses carryforward. */
-async function findBaselineStart(
-  api: GitHub,
-  event: Event,
-  base: string | undefined,
-  config: Config,
-  hasUploads: boolean,
-) {
-  if (
-    !base &&
-    event.event === 'push' &&
-    hasUploads &&
-    (config.defaultCarryforward || [...config.flags.values()].some((flag) => flag.carryforward))
-  ) {
+async function findBaselineStart(api: GitHub, event: Event, base: string | undefined, config: Config) {
+  if (!base && event.event === 'push' && carriesForward(config)) {
     const { data } = await api.rest.repos.getCommit({ ...event.repo, ref: event.commit, per_page: 1 });
     if (data.parents[0]) return sha(data.parents[0].sha);
   }
@@ -184,19 +178,22 @@ async function reportCoverage(
 
   const { base, diff, complete } = await getDiff(api, event, token);
   const { config, text, fromBase } = await loadConfig(api, event, base);
-  const uploads = await loadUploads(api, event, token, namespace);
+  const uploads = await loadUploads(api, event, token, namespace, (checkout) =>
+    checkoutDiff(api, event, token, checkout),
+  );
   info(
     `Read ${uploads.size} coverage flag(s) and ${diff.size} changed file(s) in ${Math.round((Date.now() - started) / 1000)}s`,
   );
-  const baselineStart = await findBaselineStart(api, event, base, config, uploads.size > 0);
-  const baseline =
-    baselineStart && uploads.size
-      ? await findBaseline(api, event, baselineStart, token, config, namespace)
-      : undefined;
+  // A run whose jobs were all skipped by path filters can still carry every flag forward.
+  const wantsBaseline = uploads.size > 0 || carriesForward(config);
+  const baselineStart = wantsBaseline ? await findBaselineStart(api, event, base, config) : undefined;
+  const baseline = baselineStart
+    ? await findBaseline(api, event, baselineStart, token, config, namespace)
+    : undefined;
   const report = compute(uploads, diff, config, baseline?.flags, complete, !!base);
 
   const configChanged = await changedPolicy(api, event, fromBase, text);
-  const { reportId, htmlId } = uploads.size
+  const { reportId, htmlId } = report.hasCoverage
     ? await publishArtifacts(api, event, namespace, report, {
         config,
         text,
@@ -215,7 +212,7 @@ async function reportCoverage(
     htmlId,
     reportId,
     outputRunId: context.runId,
-    hasUploads: !!uploads.size,
+    hasUploads: report.hasCoverage,
   };
   await publishSummary(display);
   if (event.base && (!event.fork || mode === 'comment')) {

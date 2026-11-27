@@ -528,3 +528,51 @@ test('optional missing flags keep their behavior and carried-forward coverage sa
     true,
   );
 });
+
+test('a run without uploads reports carried coverage only when every flag carried forward', () => {
+  const config = readConfig(
+    'require_uploads: true\nflags: {api: {carryforward: true}, web: {carryforward: true}}',
+  );
+  const api = deserialize({ 'src/api.ts': { lines: { 1: [1] } } });
+  const web = deserialize({ 'web/app.ts': { lines: { 1: [1], 2: [1] } } });
+  const diff: Diff = new Map([['docs/readme.md', { lines: new Set([1]) }]]);
+  const all = compute(
+    new Map(),
+    diff,
+    config,
+    new Map([
+      ['api', api],
+      ['web', web],
+    ]),
+  );
+  assert.deepEqual([all.carriedOnly, all.hasCoverage, all.carried], [true, true, ['api', 'web']]);
+  assert.deepEqual(
+    all.checks.map((check) => check.conclusion),
+    ['success', 'success'],
+  );
+  assert.equal(all.project.total, 3);
+
+  // A changed file that only carried-forward coverage measures had a skipped test job.
+  const touched: Diff = new Map([['web/app.ts', { lines: new Set([2]) }]]);
+  const stale = compute(
+    new Map(),
+    touched,
+    config,
+    new Map([
+      ['api', api],
+      ['web', web],
+    ]),
+  );
+  const patch = stale.checks.find((check) => check.name === 'patch');
+  assert.equal(patch?.conclusion, 'failure');
+  assert.match(patch?.message ?? '', /1 changed file\(s\) are only measured by carried-forward coverage/);
+
+  // One flag without a baseline leaves the run without uploads, as before.
+  const partial = compute(new Map(), diff, config, new Map([['api', api]]));
+  assert.deepEqual([partial.carriedOnly, partial.hasCoverage, partial.missing], [false, false, ['web']]);
+  assert.match(partial.checks[0].message, /No coverage uploads found/);
+
+  // Fresh uploads keep using carried coverage in the patch, as before.
+  const mixed = compute(new Map([['api', api]]), touched, config, new Map([['web', web]]));
+  assert.equal(mixed.checks.find((check) => check.name === 'patch')?.conclusion, 'success');
+});

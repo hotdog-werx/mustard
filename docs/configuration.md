@@ -65,6 +65,14 @@ restricted to the configured paths. Use this for path-filtered jobs whose
 sources and tests are unchanged when skipped. `status: true` enables the
 corresponding project-style `mustard/flag/api` check.
 
+A run with no uploads, such as a PR that changes no tested paths, still looks up
+the baseline when any flag uses carryforward. If every configured flag carries
+forward, Mustard reports the carried coverage and does not count the run as
+missing uploads, so `require_uploads: true` works with path-filtered jobs. The
+patch check fails if a changed file is measured only by carried-forward
+coverage, because that file's test job did not run. If any configured flag
+cannot carry forward, the run counts as having no uploads.
+
 `required: true` marks the report incomplete when that flag has no upload for
 the attempt. Checks without a `flags` filter, and checks filtered to the missing
 flag, then fail. An incomplete report does not update the badge or become a
@@ -113,10 +121,11 @@ for the baseline selection rules, attestations, and retention.
 The PR's merge-base config controls gating by default. To opt into the PR head
 on a same-repo PR, set `config.source: head` in trusted config or pass
 `config-source: head` to the report action. Fork checks always use the
-merge-base config. For PR workflows that test GitHub's synthetic merge checkout,
-Mustard measures the uploaded reports and associates them with the PR head. If
-base-only changes cause source line offsets, test the exact head checkout for
-line-accurate patch measurements.
+merge-base config. PR test jobs usually run on GitHub's synthetic merge commit.
+Each upload records that commit, and the report maps its coverage to the PR
+head's paths and line numbers using the diff between them. Lines and files that
+exist only on the base branch are dropped. If that diff is unavailable, Mustard
+warns and keeps the merge commit's line numbers.
 
 ## Comments, badges, and HTML
 

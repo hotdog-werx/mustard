@@ -54,16 +54,51 @@ export async function publicRepository(api: GitHub, repo: Event['repo']): Promis
   return data.visibility ? data.visibility === 'public' : !data.private;
 }
 
-/** Checks that a completed push run belongs to the expected repository, workflow, commit, and allowed branch. */
-export function trustedRun(run: Run, event: Event, commit: string, config: Config): boolean {
+/** Checks that a completed push run belongs to the expected repository, commit, and allowed branch. */
+function trustedPush(run: Run, event: Event, commit: string, config: Config): boolean {
   return (
     run.head_sha === commit &&
     run.event === 'push' &&
     run.status === 'completed' &&
     run.head_repository?.full_name.toLowerCase() === repository(event.repo).toLowerCase() &&
-    run.path === event.workflow &&
     !!run.head_branch &&
     [event.defaultBranch, ...config.baseline.branches].includes(run.head_branch)
+  );
+}
+
+/** Checks that a completed push run belongs to the expected repository, workflow, commit, and allowed branch. */
+export function trustedRun(run: Run, event: Event, commit: string, config: Config): boolean {
+  return trustedPush(run, event, commit, config) && run.path === event.workflow;
+}
+
+/** Lists trusted push runs of a commit from workflows other than the one being searched. */
+function otherWorkflows(runs: Run[], event: Event, commit: string, config: Config) {
+  return runs
+    .filter((run) => run.path !== event.workflow && trustedPush(run, event, commit, config))
+    .map((run) => ({ run, commit }));
+}
+
+/** Explains an empty baseline search, naming another workflow that holds a report for a searched commit. */
+async function explainMissingBaseline(
+  api: GitHub,
+  event: Event,
+  namespace: Names,
+  searched: number,
+  elsewhere: Array<{ run: Run; commit: string }>,
+) {
+  // Only a few runs are inspected so a long walk does not multiply API calls.
+  for (const { run, commit } of elsewhere.slice(0, 5)) {
+    const prefix = reportArtifactName(namespace, commit, 1);
+    const artifacts = await listArtifacts(api, event.repo, run.id);
+    if (artifacts.some((entry) => entry.name.startsWith(prefix) && !entry.expired)) {
+      warning(
+        `No baseline from ${event.workflow}, but push run ${run.id} of ${run.path} has a Mustard report for ${commit.slice(0, 12)}. Set the workflow input to ${run.path} to use it.`,
+      );
+      return;
+    }
+  }
+  info(
+    `No baseline report found in push runs of ${event.workflow} across ${searched} commit(s). If push coverage runs in another workflow file, set the workflow input to that file.`,
   );
 }
 
@@ -345,7 +380,10 @@ export async function findBaseline(
   }
 
   let commit = start;
+  let searched = 0;
+  const elsewhere: Array<{ run: Run; commit: string }> = [];
   for (let distance = 0; distance <= config.baseline.maxWalk; distance++) {
+    searched++;
     const { data } = await api.rest.actions.listWorkflowRunsForRepo({
       ...event.repo,
       head_sha: commit,
@@ -353,6 +391,7 @@ export async function findBaseline(
       status: 'completed',
       per_page: 100,
     });
+    elsewhere.push(...otherWorkflows(data.workflow_runs, event, commit, config));
     const runs = data.workflow_runs
       .filter((run) => trustedRun(run, event, commit, config))
       .sort(
@@ -367,4 +406,5 @@ export async function findBaseline(
     if (!revision.parents[0]) break;
     commit = sha(revision.parents[0].sha);
   }
+  await explainMissingBaseline(api, event, namespace, searched, elsewhere);
 }
