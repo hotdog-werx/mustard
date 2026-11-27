@@ -316,6 +316,9 @@ export async function loadUploads(
     const archive = await readZip(bytes, ['coverage.json.gz']);
     const json = unz(requiredEntry(archive, 'coverage.json.gz'));
     expanded += json.length;
+    // Keep this branch under test. When it never runs, V8 coverage reports it
+    // only some of the time, which shifts project coverage between CI runs. See
+    // the per-run limit test in tests/github.test.ts.
     if (expanded > maxRunBytes) throw new Error('Coverage uploads exceed the per-run expanded size limit');
     const payload = record(JSON.parse(json.toString('utf8')));
     const checkout = uploadCheckout(payload, event, flag, shard);
